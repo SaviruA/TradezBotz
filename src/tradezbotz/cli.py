@@ -23,10 +23,22 @@ DEFAULT_STATE = Path(os.environ.get("TRADEZBOTZ_STATE", "state"))
 EVENTS_DB = "events.db"
 BARS_DB = "bars.db"
 CHECKPOINT_DB = "backfill.db"
+KIND_INSIDER = "insider_transaction"
 
-#: Free-tier price history ceiling. Ingesting events older than this produces
-#: rows that can never be labelled.
-HISTORY_DAYS = 730
+#: Free-tier price history ceiling. Events older than this can never be
+#: labelled, because no price data exists to measure their outcome.
+PRICE_WINDOW_DAYS = 730
+
+#: How much EDGAR history to ingest by default. Deliberately deeper than the
+#: price window: the routine/opportunistic classifier needs 3+ years of an
+#: insider's prior filings, so a 2-year ingest leaves every insider UNKNOWN and
+#: the filter carrying the actual edge never fires. EDGAR history is free and
+#: unbounded; the price window is not. These two limits are unrelated and must
+#: not be collapsed into one number.
+BASELINE_DAYS = 1825  # ~5 years
+
+#: Retained for callers that predate the split.
+HISTORY_DAYS = PRICE_WINDOW_DAYS
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -42,18 +54,25 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
 
 
 def cmd_ingest_edgar(args: argparse.Namespace) -> int:
+    from .lock import SingleInstance
     from .research.edgar import EdgarClient, ingest_day
     from .research.eventstore import EventStore
 
+    # Two concurrent ingests push EDGAR traffic past the SEC's 10 req/s limit.
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+
     end = args.end or date.today()
     start = args.start or (end - timedelta(days=args.days))
-    if (date.today() - start).days > HISTORY_DAYS:
+    price_cutoff = date.today() - timedelta(days=PRICE_WINDOW_DAYS)
+    if start < price_cutoff:
         print(
-            f"note: {start} is beyond the {HISTORY_DAYS}-day price history window; "
-            "those events will ingest but cannot be labelled.",
+            f"note: filings before {price_cutoff} have no price data and cannot be "
+            "labelled. They are ingested on purpose, as baselines for the "
+            "routine/opportunistic classifier.",
             file=sys.stderr,
         )
 
+    lock.acquire()
     client = EdgarClient()
     # Prove the User-Agent works once, so a later 403 can be read as "index not
     # published yet" rather than "credentials rejected". Fail fast if it doesn't.
@@ -115,13 +134,23 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     from .research.eventstore import EventStore
 
     store = EventStore(DEFAULT_STATE / EVENTS_DB)
-    events = list(store.as_of(datetime.now(timezone.utc)))
-    symbols = symbols_from_events(events)
+    now = datetime.now(timezone.utc)
+    # Only symbols inside the price window are worth fetching. Baseline-only
+    # filings can never be labelled, and at 5 requests/minute queueing them
+    # would spend days of budget on data with no possible outcome.
+    since = now - timedelta(days=args.price_window)
+    labellable = list(store.as_of(now, since=since))
+    all_events = store.count(KIND_INSIDER)
+    symbols = symbols_from_events(labellable)
     store.close()
 
     runner = _make_runner()
     added = runner.enqueue(symbols)
-    print(f"{len(symbols)} distinct symbols in event store; {added} newly queued")
+    print(
+        f"{all_events} stored events; {len(labellable)} inside the "
+        f"{args.price_window}-day price window"
+    )
+    print(f"{len(symbols)} distinct labellable symbols; {added} newly queued")
     print(runner.progress())
     runner.close()
     return 0
@@ -139,12 +168,20 @@ def _make_runner(limit_per_minute: int | None = None):
     return BackfillRunner(
         source,
         DEFAULT_STATE / CHECKPOINT_DB,
-        start=end - timedelta(days=HISTORY_DAYS),
+        start=end - timedelta(days=PRICE_WINDOW_DAYS),
         end=end,
     )
 
 
 def cmd_backfill(args: argparse.Namespace) -> int:
+    from .lock import SingleInstance
+
+    # Concurrent backfills would double the request rate and race on the cache.
+    with SingleInstance("backfill", DEFAULT_STATE):
+        return _run_backfill(args)
+
+
+def _run_backfill(args: argparse.Namespace) -> int:
     runner = _make_runner(args.per_minute)
     runner.install_signal_handlers()
 
@@ -200,7 +237,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     ing = sub.add_parser("ingest-edgar", help="pull Form 4 filings into the event store")
-    ing.add_argument("--days", type=int, default=7, help="lookback when --start omitted")
+    ing.add_argument("--days", type=int, default=BASELINE_DAYS,
+                     help=f"EDGAR history to ingest (default {BASELINE_DAYS}, ~5y). "
+                          "Deeper than the price window on purpose: classifier "
+                          "baselines need 3+ years per insider.")
     ing.add_argument("--start", type=date.fromisoformat)
     ing.add_argument("--end", type=date.fromisoformat)
     ing.add_argument("--max-minutes", type=float,
@@ -209,7 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="re-pull days already marked complete")
     ing.set_defaults(func=cmd_ingest_edgar)
 
-    enq = sub.add_parser("enqueue-symbols", help="queue every symbol seen in events")
+    enq = sub.add_parser("enqueue-symbols",
+                         help="queue symbols from events that can actually be labelled")
+    enq.add_argument("--price-window", type=int, default=PRICE_WINDOW_DAYS,
+                     help=f"days of price history available (default {PRICE_WINDOW_DAYS})")
     enq.set_defaults(func=cmd_enqueue_symbols)
 
     bf = sub.add_parser("backfill", help="fetch daily bars for queued symbols")
@@ -223,10 +266,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .lock import LockHeld
+
     _load_dotenv()
     DEFAULT_STATE.mkdir(parents=True, exist_ok=True)
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except LockHeld as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
