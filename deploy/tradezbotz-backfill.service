@@ -1,0 +1,21 @@
+[Unit]
+Description=TradezBotz price backfill (long-running, resumable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/.venv/bin/python -m tradezbotz backfill
+# Checkpointed per symbol, so a restart resumes rather than repeating. Restart
+# on failure covers vendor outages and transient network loss.
+Restart=on-failure
+RestartSec=120
+# SIGTERM is handled: the runner finishes the current symbol, then exits clean.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
