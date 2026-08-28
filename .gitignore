@@ -13,3 +13,4 @@ KILL
 
 # bulk archives are large and re-downloadable
 state/bulk/
+state/submissions.db

@@ -140,6 +140,9 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
     from .research.bulk import download_quarter, events_from_archive, quarters_between
     from .research.edgar import EdgarClient
     from .research.eventstore import EventStore
+    from .research.submissions import (
+        SubmissionsCache, SubmissionsClient, upgrade_precision,
+    )
 
     end = args.end or date.today()
     start = args.start or (end - timedelta(days=args.days))
@@ -155,6 +158,8 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
         client.verify_access()
         store = EventStore(DEFAULT_STATE / EVENTS_DB)
         archives = DEFAULT_STATE / "bulk"
+        subs_cache = SubmissionsCache(DEFAULT_STATE / "submissions.db")
+        subs = SubmissionsClient(client, subs_cache)
         total = 0
         for year, quarter in quarters_between(start, min(end, cutoff)):
             try:
@@ -163,6 +168,21 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
                 print(f"{year}Q{quarter}  not published yet")
                 continue
             events = list(events_from_archive(path, before=cutoff))
+
+            if args.timed and events:
+                # Bulk archives carry only a filing date. One request per issuer
+                # recovers the exact acceptance time for all of that issuer's
+                # filings -- ~4,200 issuers a quarter against ~27,000 filings,
+                # so this costs minutes rather than hours.
+                ciks = {e.payload.get("issuer_cik") for e in events}
+                ciks.discard(None)
+                fetched = subs.load_ciks(sorted(ciks))
+                events = list(upgrade_precision(events, subs_cache))
+                timed = sum(1 for e in events if e.payload.get("precision") == "timed")
+                print(f"{year}Q{quarter}  issuers {len(ciks):5,d} "
+                      f"(fetched {fetched:5,d})  timed {timed:7,d}/{len(events):,d}",
+                      flush=True)
+
             new = store.record_many(events)
             total += new
             print(f"{year}Q{quarter}  events {len(events):7,d}  new {new:7,d}", flush=True)
@@ -185,6 +205,15 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     # would spend days of budget on data with no possible outcome.
     since = now - timedelta(days=args.price_window)
     labellable = list(store.as_of(now, since=since))
+    if args.buys_only:
+        # Open-market purchases are the signal; they touch ~35% of the symbols
+        # that all transaction codes do. At 5 requests/minute that is the
+        # difference between a 5-hour and a 15-hour backfill.
+        labellable = [
+            e for e in labellable
+            if e["payload"].get("transaction_code") == "P"
+            and e["payload"].get("acquired_disposed") == "A"
+        ]
     all_events = store.count(KIND_INSIDER)
     symbols = symbols_from_events(labellable)
     store.close()
@@ -300,6 +329,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"history to load (default {BASELINE_DAYS}, ~5y)")
     blk.add_argument("--start", type=date.fromisoformat)
     blk.add_argument("--end", type=date.fromisoformat)
+    blk.add_argument("--timed", action="store_true",
+                     help="join exact acceptance times from the submissions API. "
+                          "Required for the labelling window; unnecessary for deep "
+                          "baselines, where only transaction dates matter.")
     blk.add_argument("--before", type=date.fromisoformat,
                      help="stop before this date; defaults to the price window "
                           "start, leaving recent filings to the timed path")
@@ -307,6 +340,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     enq = sub.add_parser("enqueue-symbols",
                          help="queue symbols from events that can actually be labelled")
+    enq.add_argument("--buys-only", action="store_true",
+                     help="queue only symbols with an open-market purchase")
     enq.add_argument("--price-window", type=int, default=PRICE_WINDOW_DAYS,
                      help=f"days of price history available (default {PRICE_WINDOW_DAYS})")
     enq.set_defaults(func=cmd_enqueue_symbols)
