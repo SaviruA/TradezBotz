@@ -129,6 +129,51 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest_bulk(args: argparse.Namespace) -> int:
+    """Load baselines from the SEC's quarterly Form 345 archives.
+
+    ~20 downloads for five years, versus roughly half a million individual
+    filing fetches. Stops short of the price window so it cannot collide with
+    the timed per-filing path, which mints different external_ids.
+    """
+    from .lock import SingleInstance
+    from .research.bulk import download_quarter, events_from_archive, quarters_between
+    from .research.edgar import EdgarClient
+    from .research.eventstore import EventStore
+
+    end = args.end or date.today()
+    start = args.start or (end - timedelta(days=args.days))
+    cutoff = args.before or (date.today() - timedelta(days=PRICE_WINDOW_DAYS))
+
+    print(f"baselines {start} -> {cutoff} (bulk, date-only precision)")
+    print(f"per-filing path keeps everything from {cutoff} onward\n")
+
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        client = EdgarClient()
+        client.verify_access()
+        store = EventStore(DEFAULT_STATE / EVENTS_DB)
+        archives = DEFAULT_STATE / "bulk"
+        total = 0
+        for year, quarter in quarters_between(start, min(end, cutoff)):
+            try:
+                path = download_quarter(client, year, quarter, archives)
+            except FileNotFoundError:
+                print(f"{year}Q{quarter}  not published yet")
+                continue
+            events = list(events_from_archive(path, before=cutoff))
+            new = store.record_many(events)
+            total += new
+            print(f"{year}Q{quarter}  events {len(events):7,d}  new {new:7,d}", flush=True)
+        print(f"\ntotal new baseline events: {total:,}")
+        print(f"event store total: {store.count():,}")
+        store.close()
+    finally:
+        lock.release()
+    return 0
+
+
 def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     from .research.backfill import symbols_from_events
     from .research.eventstore import EventStore
@@ -248,6 +293,17 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--force", action="store_true",
                      help="re-pull days already marked complete")
     ing.set_defaults(func=cmd_ingest_edgar)
+
+    blk = sub.add_parser("ingest-bulk",
+                         help="load baselines from SEC quarterly archives (fast)")
+    blk.add_argument("--days", type=int, default=BASELINE_DAYS,
+                     help=f"history to load (default {BASELINE_DAYS}, ~5y)")
+    blk.add_argument("--start", type=date.fromisoformat)
+    blk.add_argument("--end", type=date.fromisoformat)
+    blk.add_argument("--before", type=date.fromisoformat,
+                     help="stop before this date; defaults to the price window "
+                          "start, leaving recent filings to the timed path")
+    blk.set_defaults(func=cmd_ingest_bulk)
 
     enq = sub.add_parser("enqueue-symbols",
                          help="queue symbols from events that can actually be labelled")

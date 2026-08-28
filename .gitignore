@@ -10,3 +10,6 @@ data/
 KILL
 .pytest_cache/
 .DS_Store
+
+# bulk archives are large and re-downloadable
+state/bulk/

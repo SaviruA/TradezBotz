@@ -325,3 +325,109 @@ class MassivePriceSource:
             return False  # no bars means no evidence either way; do not spend a call
         effective_end = min(requested_end, date.today())
         return (effective_end - bars[-1].day).days > STALE_BAR_DAYS
+
+
+ALPACA_DATA_BASE = "https://data.alpaca.markets"
+
+#: Alpaca's free Basic plan allows 200 requests/minute -- 40x Massive's budget.
+ALPACA_REQUESTS_PER_MINUTE = 200
+
+
+class AlpacaPriceSource:
+    """Alpaca daily bars, intended as a CROSS-CHECK rather than a primary source.
+
+    Attractive on paper: 7+ years of history against Massive's 2, and 200
+    requests/minute against 5. But the free feed carries only IEX prints --
+    roughly 2.5% of US volume -- and its documented failure mode is ghost prices
+    on illiquid names, where IEX can show a last trade materially away from where
+    the stock actually printed elsewhere.
+
+    That failure lands squarely on this project's population: insider purchases
+    skew small-cap, which is exactly where a single-venue feed is least
+    trustworthy. So this is not a substitute for Massive and not a safe way to
+    extend history.
+
+    Its value is disagreement. Where two independent sources diverge on the same
+    bar, that divergence is itself evidence the name is too thinly traded to
+    trust -- information we otherwise would not have. See `crosscheck.compare`.
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        *,
+        cache: PriceCache | None = None,
+        per_minute: int = ALPACA_REQUESTS_PER_MINUTE,
+        session: requests.Session | None = None,
+        feed: str = "iex",
+    ) -> None:
+        self.api_key = api_key or os.environ.get("ALPACA_PAPER_API_KEY", "")
+        self.api_secret = api_secret or os.environ.get("ALPACA_PAPER_API_SECRET", "")
+        if not self.api_key or not self.api_secret:
+            raise PriceError(
+                "ALPACA_PAPER_API_KEY and ALPACA_PAPER_API_SECRET are not set. "
+                "See .env.example."
+            )
+        self.cache = cache
+        self.limiter = RateLimiter(per_minute)
+        self.session = session or requests.Session()
+        self.feed = feed
+
+    def daily_bars(self, symbol: str, start: date, end: date) -> Series:
+        symbol = symbol.upper()
+        if self.cache and self.cache.covered(symbol, start, end):
+            return self.cache.get(symbol, start, end)
+
+        bars: list[Bar] = []
+        page: str | None = None
+        while True:
+            self.limiter.acquire()
+            params = {
+                "timeframe": "1Day",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                # Split- and dividend-adjusted, matching what we ask Massive for.
+                # Mismatched adjustment would show up as fake disagreement.
+                "adjustment": "all",
+                "feed": self.feed,
+                "limit": 10000,
+            }
+            if page:
+                params["page_token"] = page
+            resp = self.session.get(
+                f"{ALPACA_DATA_BASE}/v2/stocks/{symbol}/bars",
+                params=params,
+                headers={
+                    "APCA-API-KEY-ID": self.api_key,
+                    "APCA-API-SECRET-KEY": self.api_secret,
+                },
+                timeout=45,
+            )
+            if resp.status_code in (401, 403):
+                raise PriceError(f"Alpaca rejected the credentials ({resp.status_code}).")
+            resp.raise_for_status()
+            body = resp.json()
+            for r in body.get("bars") or []:
+                bars.append(
+                    Bar(
+                        day=datetime.fromisoformat(
+                            r["t"].replace("Z", "+00:00")
+                        ).date(),
+                        open=float(r["o"]), high=float(r["h"]), low=float(r["l"]),
+                        close=float(r["c"]), volume=float(r.get("v", 0.0)),
+                    )
+                )
+            page = body.get("next_page_token")
+            if not page:
+                break
+
+        # Alpaca exposes no delisting flag, so coverage is left unknown rather
+        # than guessed. Massive remains the authority on whether a ticker lives.
+        series = Series(
+            symbol=symbol, bars=tuple(bars),
+            requested_start=start, requested_end=end, is_active=None,
+        )
+        if self.cache:
+            self.cache.put(series)
+        return series
