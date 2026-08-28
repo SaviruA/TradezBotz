@@ -1,0 +1,18 @@
+[Unit]
+Description=TradezBotz daily SEC Form 4 ingest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/.venv/bin/python -m tradezbotz ingest-edgar --days 5
+ExecStartPost=@REPO_DIR@/.venv/bin/python -m tradezbotz enqueue-symbols
+# A missed day is harmless: ingestion is idempotent by accession number and the
+# 5-day lookback re-covers anything a failed run dropped.
+TimeoutStartSec=3600
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

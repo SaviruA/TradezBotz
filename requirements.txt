@@ -1,0 +1,7 @@
+requests>=2.32
+PyYAML>=6.0
+pandas>=2.2
+numpy>=1.26
+alpaca-py>=0.33
+tzdata>=2024.1 ; sys_platform == "win32"
+pytest>=8.0

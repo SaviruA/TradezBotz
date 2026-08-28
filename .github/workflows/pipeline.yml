@@ -1,0 +1,121 @@
+name: pipeline
+
+# Sliced research pipeline. Each run takes a bounded bite of work, then hands
+# state to the next run through the Actions cache.
+#
+# Why the state blob is encrypted: this repository is public, and Actions caches
+# and artifacts on a public repo are readable by anyone. `state/bars.db` holds
+# vendor-licensed price data that must not be redistributed, so it is encrypted
+# with a passphrase held in repository secrets before it ever leaves the runner.
+# The SEC event data is public, but it lives in the same archive, so all of it
+# travels encrypted.
+
+on:
+  schedule:
+    # 04:17 UTC. Deliberately off the top of the hour: GitHub documents that
+    # scheduled runs are delayed (and sometimes dropped) at peak times, and the
+    # start of every hour is peak.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      ingest_minutes:
+        description: "Minutes to spend pulling EDGAR filings"
+        default: "120"
+      backfill_symbols:
+        description: "Symbols to price-backfill this run"
+        default: "600"
+
+concurrency:
+  # Two runs sharing one state blob would silently lose whichever finishes first.
+  group: pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Well under the 6h hard cap so the state save always gets to run.
+    timeout-minutes: 330
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+
+      - name: Restore pipeline state
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: state.tar.gz.gpg
+          # Caches are immutable, so each run writes a new key and restores the
+          # newest match by prefix.
+          key: tzb-state-${{ github.run_id }}
+          restore-keys: tzb-state-
+
+      - name: Decrypt state
+        if: steps.restore.outputs.cache-matched-key != ''
+        env:
+          PASSPHRASE: ${{ secrets.STATE_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          gpg --batch --yes --quiet --passphrase "$PASSPHRASE" \
+              --output state.tar.gz --decrypt state.tar.gz.gpg
+          tar xzf state.tar.gz
+          rm -f state.tar.gz
+          ls -la state/
+
+      - name: Ingest SEC Form 4 filings
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python -m tradezbotz ingest-edgar \
+            --days 730 \
+            --max-minutes "${{ github.event.inputs.ingest_minutes || 120 }}"
+
+      - name: Queue newly seen symbols
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: python -m tradezbotz enqueue-symbols
+
+      - name: Backfill prices
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: |
+          python -m tradezbotz backfill \
+            --limit "${{ github.event.inputs.backfill_symbols || 600 }}"
+
+      - name: Status
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: python -m tradezbotz status
+
+      # `always()` so an interrupted or failed step still persists the work that
+      # did complete. Losing hours of fetching to one bad step would be the worst
+      # possible failure mode here.
+      - name: Encrypt state
+        if: always()
+        env:
+          PASSPHRASE: ${{ secrets.STATE_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          [ -d state ] || exit 0
+          tar czf state.tar.gz state/
+          gpg --batch --yes --quiet --symmetric --cipher-algo AES256 \
+              --passphrase "$PASSPHRASE" --output state.tar.gz.gpg state.tar.gz
+          rm -f state.tar.gz
+          ls -lh state.tar.gz.gpg
+
+      - name: Save pipeline state
+        if: always() && hashFiles('state.tar.gz.gpg') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.tar.gz.gpg
+          key: tzb-state-${{ github.run_id }}

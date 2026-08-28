@@ -1,0 +1,12 @@
+[Unit]
+Description=Run TradezBotz Form 4 ingest daily
+
+[Timer]
+# 23:30 ET is after the 22:00 ET Form 4 dissemination cutoff, so a day's
+# filings are complete by the time we pull them.
+OnCalendar=*-*-* 23:30:00 America/New_York
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
