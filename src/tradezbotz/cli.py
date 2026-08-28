@@ -79,7 +79,14 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
             skipped += 1
             continue
         try:
-            events = [t.to_event() for t in ingest_day(client, day)]
+            events, rejected = [], 0
+            for txn in ingest_day(client, day):
+                # Isolate per transaction: one malformed filing among ~1000 must
+                # not cost the whole day's fetch.
+                try:
+                    events.append(txn.to_event())
+                except Exception:  # noqa: BLE001
+                    rejected += 1
         except Exception as exc:  # noqa: BLE001
             # One unavailable day must not end a multi-hour run. The day stays
             # unmarked, so the next invocation retries it.
@@ -91,7 +98,10 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
             store.mark_day_ingested("sec_form4", day, len(events))
         total_new += new
         processed += 1
-        print(f"{day}  filings->events {len(events):5d}  new {new:5d}", flush=True)
+        note = f"  rejected {rejected}" if rejected else ""
+        print(
+            f"{day}  filings->events {len(events):5d}  new {new:5d}{note}", flush=True
+        )
 
     print(f"\ndays processed {processed}, already done {skipped}, failed {failed}")
     print(f"total new events: {total_new}")

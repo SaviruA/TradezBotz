@@ -174,3 +174,127 @@ def test_missing_index_404_still_returns_empty(monkeypatch):
     c = _client(monkeypatch, _Resp(404))
 
     assert c.daily_form4_filings(date(2026, 8, 29)) == []
+
+
+# --- occurred_at vs observed_at ----------------------------------------------
+
+def test_same_day_filing_does_not_violate_ordering():
+    """Regression: insiders often trade and file the same day. A fixed
+    end-of-day placeholder for the trade time then lands AFTER dissemination
+    and trips the event store's ordering invariant, which killed every day of
+    a real ingest run."""
+    from tradezbotz.research.edgar import _occurred_at
+
+    # Traded 2026-08-27, filed the same day at 14:00 ET.
+    disseminated = datetime(2026, 8, 27, 14, 0, tzinfo=ET_TZ)
+    occurred = _occurred_at(date(2026, 8, 27), disseminated)
+
+    assert occurred <= disseminated
+
+
+def test_occurred_at_uses_market_open_when_filing_is_later():
+    from tradezbotz.research.edgar import _occurred_at
+
+    disseminated = datetime(2026, 8, 31, 6, 0, tzinfo=ET_TZ)
+    occurred = _occurred_at(date(2026, 8, 27), disseminated).astimezone(ET_TZ)
+
+    assert occurred.date() == date(2026, 8, 27)
+    assert (occurred.hour, occurred.minute) == (9, 30)
+
+
+def test_same_day_premarket_filing_clamps_to_dissemination():
+    """Pathological but real: a filing timestamped before that day's open."""
+    from tradezbotz.research.edgar import _occurred_at
+
+    disseminated = datetime(2026, 8, 27, 7, 0, tzinfo=ET_TZ)
+
+    assert _occurred_at(date(2026, 8, 27), disseminated) == disseminated
+
+
+def test_event_construction_survives_same_day_filings():
+    """End to end: the whole point is that to_event() no longer raises."""
+    same_day = FILING.replace("<value>2025-03-07</value>", "<value>2025-03-10</value>")
+    txns = parse_form4(same_day)
+
+    assert len(txns) == 1
+    event = txns[0].to_event()          # must not raise
+    assert event.occurred_at <= event.observed_at
+
+
+# --- transaction identity ----------------------------------------------------
+
+TWO_IDENTICAL_LINES = FILING.replace(
+    "  </nonDerivativeTable>",
+    """    <nonDerivativeTransaction>
+      <transactionDate><value>2025-03-07</value></transactionDate>
+      <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>5000</value></transactionShares>
+        <transactionPricePerShare><value>150.25</value></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>""",
+)
+
+
+def test_identical_lines_in_one_filing_stay_distinct():
+    """Regression: real Form 4 filings contain lines identical on owner, date,
+    code, shares and price -- two equal tax withholdings, two equal conversions.
+    Without a line index they collide on external_id and all but one are
+    silently dropped. A real day lost 920 of 1740 transactions to this."""
+    txns = parse_form4(TWO_IDENTICAL_LINES)
+
+    assert len(txns) == 2
+    ids = {t.to_event().external_id for t in txns}
+    assert len(ids) == 2, "identical transaction lines must remain distinct events"
+
+
+def test_line_index_follows_document_order():
+    txns = parse_form4(TWO_IDENTICAL_LINES)
+
+    assert [t.line_index for t in txns] == [0, 1]
+
+
+def test_reparsing_yields_stable_ids():
+    """Ingestion is idempotent only if identity survives a re-parse."""
+    first = [t.to_event().external_id for t in parse_form4(TWO_IDENTICAL_LINES)]
+    second = [t.to_event().external_id for t in parse_form4(TWO_IDENTICAL_LINES)]
+
+    assert first == second
+
+
+# --- daily index deduplication -----------------------------------------------
+
+IDX = """Form Type  Company Name    CIK  Date Filed  File Name
+--------------------------------------------------------------
+4          ACME INC        111  2026-08-27  edgar/data/111/0001104659-26-102532.txt
+4          DOE JANE        222  2026-08-27  edgar/data/222/0001104659-26-102532.txt
+4          ROE JOHN        333  2026-08-27  edgar/data/333/0001104659-26-102532.txt
+4          OTHER CORP      444  2026-08-27  edgar/data/444/0001193125-26-371778.txt
+"""
+
+
+def test_one_filing_is_fetched_once_not_once_per_cik(monkeypatch):
+    """EDGAR indexes a Form 4 once per involved CIK -- issuer plus each
+    reporting owner -- as different URLs for the SAME document. On 2026-08-27
+    that turned 425 filings into 870 rows, doubling the request count."""
+    c = _client(monkeypatch, _Resp(200, "ok"), _Resp(200, IDX))
+    c.verify_access()
+
+    rows = c.daily_form4_filings(date(2026, 8, 27))
+
+    assert len(rows) == 2, "three rows share one accession and collapse to one"
+    assert {r[1].split("/")[-1] for r in rows} == {
+        "0001104659-26-102532.txt",
+        "0001193125-26-371778.txt",
+    }
+
+
+def test_dedup_keeps_the_first_listed_path(monkeypatch):
+    c = _client(monkeypatch, _Resp(200, "ok"), _Resp(200, IDX))
+    c.verify_access()
+
+    rows = c.daily_form4_filings(date(2026, 8, 27))
+
+    assert rows[0] == ("111", "edgar/data/111/0001104659-26-102532.txt")

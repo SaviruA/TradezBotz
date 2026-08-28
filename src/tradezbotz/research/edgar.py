@@ -40,6 +40,9 @@ ET_TZ = ZoneInfo("America/New_York")
 #: date; ordinary filings cut off at 17:30 ET.
 FORM4_CUTOFF = dtime(22, 0)
 
+#: Accession number as it appears in an EDGAR document path.
+ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})")
+
 MAX_REQUESTS_PER_SECOND = 8  # below the SEC's 10/s ceiling, with headroom
 
 #: Open-market purchase. The only transaction code with consistent academic
@@ -47,6 +50,27 @@ MAX_REQUESTS_PER_SECOND = 8  # below the SEC's 10/s ceiling, with headroom
 #: tax withholding (F) are compensation mechanics, not conviction.
 CODE_OPEN_MARKET_BUY = "P"
 CODE_OPEN_MARKET_SELL = "S"
+
+#: Regular-session open. Form 4 reports only a transaction DATE, never a time,
+#: so this stands in for the unknown intraday moment -- the earliest a trade
+#: could plausibly have happened that day.
+MARKET_OPEN_ET = dtime(9, 30)
+
+
+def _occurred_at(transaction_date: date, disseminated_at: datetime) -> datetime:
+    """Best estimate of when the trade happened, never later than when it
+    became public.
+
+    Same-day filings are common: an insider trades at 10:00 and the filing agent
+    submits by 14:00. Any fixed end-of-day placeholder would then sit *after*
+    dissemination and trip the event store's ordering invariant. Clamping keeps
+    the estimate honest without weakening the invariant -- which is doing its
+    job here, since it caught exactly this bug.
+    """
+    approx = datetime.combine(
+        transaction_date, MARKET_OPEN_ET, tzinfo=ET_TZ
+    ).astimezone(timezone.utc)
+    return min(approx, disseminated_at)
 
 
 class EdgarError(RuntimeError):
@@ -81,6 +105,13 @@ class InsiderTransaction:
     acquired_disposed: str
     transaction_date: date
     disseminated_at: datetime
+    #: Ordinal position within the filing's nonDerivativeTable. Real filings
+    #: contain lines identical on every other field -- two 27-share tax
+    #: withholdings at one price, two equal conversions -- so without this
+    #: they collide on external_id and all but one are silently dropped.
+    #: XML element order is stable, so re-parsing yields the same index and
+    #: ingestion stays idempotent.
+    line_index: int = 0
 
     @property
     def notional(self) -> float | None:
@@ -98,16 +129,11 @@ class InsiderTransaction:
     def to_event(self) -> Event:
         return Event(
             source="sec_form4",
-            external_id=(
-                f"{self.accession}:{self.owner_cik}:{self.transaction_date}:"
-                f"{self.transaction_code}:{self.shares:g}"
-            ),
+            external_id=f"{self.accession}:{self.line_index}:{self.owner_cik}",
             kind="insider_transaction",
             symbol=self.symbol,
             observed_at=self.disseminated_at,
-            occurred_at=datetime.combine(
-                self.transaction_date, dtime(21, 0), tzinfo=timezone.utc
-            ),
+            occurred_at=_occurred_at(self.transaction_date, self.disseminated_at),
             payload={
                 "accession": self.accession,
                 "issuer_cik": self.issuer_cik,
@@ -183,6 +209,13 @@ class EdgarClient:
                 return []  # index not published for this day
             raise  # credentials never proven; a real 403 must stay loud
 
+        # A Form 4 involves an issuer and one or more reporting owners, and EDGAR
+        # indexes it once per CIK -- same document, different URL
+        # (edgar/data/<CIK>/<accession>.txt). Fetching every row would download
+        # each filing roughly twice: on 2026-08-27, 870 rows carried just 425
+        # distinct accessions. Deduplicating here halves the request count, which
+        # at 8 req/s is hours off a multi-year backfill.
+        seen: set[str] = set()
         out: list[tuple[str, str]] = []
         for line in body.splitlines():
             # Columns: Form Type | Company Name | CIK | Date Filed | File Name
@@ -191,7 +224,13 @@ class EdgarClient:
             parts = [p for p in re.split(r"\s{2,}", line.strip()) if p]
             if len(parts) < 5 or parts[0] != "4":
                 continue
-            out.append((parts[2], parts[4]))
+            cik, path = parts[2], parts[4]
+            match = ACCESSION_RE.search(path)
+            key = match.group(1) if match else path
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((cik, path))
         return out
 
     def fetch_filing(self, document_path: str) -> str:
@@ -274,7 +313,9 @@ def parse_form4(raw: str) -> list[InsiderTransaction]:
         return (_text(rel.find(name)) if rel is not None else None) in ("1", "true")
 
     results: list[InsiderTransaction] = []
-    for txn in doc.findall("nonDerivativeTable/nonDerivativeTransaction"):
+    for idx, txn in enumerate(
+        doc.findall("nonDerivativeTable/nonDerivativeTransaction")
+    ):
         code = _text(txn.find("transactionCoding/transactionCode"))
         tdate = _text(txn.find("transactionDate"))
         shares = _float(txn.find("transactionAmounts/transactionShares"))
@@ -304,6 +345,7 @@ def parse_form4(raw: str) -> list[InsiderTransaction]:
                 or "",
                 transaction_date=date.fromisoformat(tdate),
                 disseminated_at=disseminated,
+                line_index=idx,
             )
         )
     return results
