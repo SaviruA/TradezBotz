@@ -14,3 +14,6 @@ KILL
 # bulk archives are large and re-downloadable
 state/bulk/
 state/submissions.db
+
+# build metadata from editable installs
+*.egg-info/
