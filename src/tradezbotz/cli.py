@@ -148,8 +148,11 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
     start = args.start or (end - timedelta(days=args.days))
     cutoff = args.before or (date.today() - timedelta(days=PRICE_WINDOW_DAYS))
 
-    print(f"baselines {start} -> {cutoff} (bulk, date-only precision)")
-    print(f"per-filing path keeps everything from {cutoff} onward\n")
+    # flush: these run under nohup and systemd, where an unflushed header makes
+    # a working job look hung for the ~9 minutes a first quarter takes.
+    print(f"loading {start} -> {cutoff}", flush=True)
+    kind = "exact (submissions API)" if args.timed else "date-only"
+    print(f"timestamps: {kind}\n", flush=True)
 
     lock = SingleInstance("ingest", DEFAULT_STATE)
     lock.acquire()
