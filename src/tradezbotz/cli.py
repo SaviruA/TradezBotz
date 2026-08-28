@@ -164,7 +164,16 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
         subs_cache = SubmissionsCache(DEFAULT_STATE / "submissions.db")
         subs = SubmissionsClient(client, subs_cache)
         total = 0
+        deadline = (
+            time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
+        )
         for year, quarter in quarters_between(start, min(end, cutoff)):
+            if deadline and time.monotonic() > deadline:
+                # CI runs are time-boxed. Quarters already stored are skipped on
+                # the next invocation, so stopping here loses nothing.
+                print("time budget reached; remaining quarters left for next run",
+                      flush=True)
+                break
             try:
                 path = download_quarter(client, year, quarter, archives)
             except FileNotFoundError:
@@ -332,6 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"history to load (default {BASELINE_DAYS}, ~5y)")
     blk.add_argument("--start", type=date.fromisoformat)
     blk.add_argument("--end", type=date.fromisoformat)
+    blk.add_argument("--max-minutes", type=float,
+                     help="stop cleanly after N minutes (for sliced CI runs)")
     blk.add_argument("--timed", action="store_true",
                      help="join exact acceptance times from the submissions API. "
                           "Required for the labelling window; unnecessary for deep "

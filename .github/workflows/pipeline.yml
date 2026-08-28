@@ -72,18 +72,32 @@ jobs:
           rm -f state.tar.gz
           ls -la state/
 
-      - name: Ingest SEC Form 4 filings
+      # Bulk archives first: one ~13 MB download carries a whole quarter, and
+      # acceptance times come from ~4,200 issuer requests rather than ~27,000
+      # filing fetches. Verified equal coverage against the per-filing path.
+      - name: Ingest SEC bulk archives (baselines + labelling window)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          python -m tradezbotz ingest-edgar \
-            --days 730 \
-            --max-minutes "${{ github.event.inputs.ingest_minutes || 120 }}"
+          python -m tradezbotz ingest-bulk \
+            --timed \
+            --days 1825 \
+            --before "$(date -u -d '1 day' +%Y-%m-%d)" \
+            --max-minutes "${{ github.event.inputs.ingest_minutes || 150 }}"
+
+      # Bulk archives only exist through the last completed quarter, so the
+      # current quarter still needs the per-filing path. Structural, not a bug.
+      - name: Ingest current quarter (per-filing)
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: python -m tradezbotz ingest-edgar --days 100 --max-minutes 45
 
       - name: Queue newly seen symbols
         env:
           MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
-        run: python -m tradezbotz enqueue-symbols
+        # Open-market purchases are the signal and touch ~35% of the symbols
+        # all transaction codes do -- at 5 req/min that is 5h instead of 15h.
+        run: python -m tradezbotz enqueue-symbols --buys-only
 
       - name: Backfill prices
         env:
