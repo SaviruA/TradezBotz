@@ -48,7 +48,13 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -q -r requirements.txt
+        # requirements.txt carries the third-party deps; `-e .` puts the
+        # tradezbotz package itself on the path. Without the second line
+        # `python -m tradezbotz` fails, which local runs hide by exporting
+        # PYTHONPATH=src.
+        run: |
+          pip install -q -r requirements.txt
+          pip install -q -e .
 
       - name: Restore pipeline state
         id: restore
