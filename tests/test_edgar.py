@@ -109,3 +109,68 @@ def test_filing_without_ticker_is_skipped():
         "<issuerTradingSymbol></issuerTradingSymbol>",
     )
     assert parse_form4(no_ticker) == []
+
+
+# --- daily index availability ------------------------------------------------
+
+class _Resp:
+    def __init__(self, status, text=""):
+        self.status_code = status
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise AssertionError(self.status_code)
+
+
+class _Session:
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.headers = {}
+        self.urls: list[str] = []
+
+    def get(self, url, timeout=None):
+        self.urls.append(url)
+        return self._responses.pop(0) if self._responses else _Resp(200, "")
+
+
+def _client(monkeypatch, *responses):
+    from tradezbotz.research.edgar import EdgarClient
+
+    monkeypatch.setenv("SEC_USER_AGENT", "test harness dev@example.com")
+    return EdgarClient(session=_Session(*responses))
+
+
+def test_unpublished_index_is_skipped_once_access_is_verified(monkeypatch):
+    """EDGAR answers 403 -- not 404 -- for a daily index that does not exist
+    yet. Yesterday's index routinely 403s, and that must not be fatal."""
+    c = _client(monkeypatch, _Resp(200, "ok"), _Resp(403))
+    c.verify_access()
+
+    assert c.daily_form4_filings(date(2026, 8, 28)) == []
+
+
+def test_403_before_verification_stays_fatal(monkeypatch):
+    """A genuinely rejected User-Agent must not be silently swallowed as an
+    empty day -- that would report zero filings for all of history."""
+    from tradezbotz.research.edgar import EdgarError
+
+    c = _client(monkeypatch, _Resp(403))
+
+    with pytest.raises(EdgarError, match="403"):
+        c.daily_form4_filings(date(2026, 8, 28))
+
+
+def test_verify_access_raises_on_rejected_user_agent(monkeypatch):
+    from tradezbotz.research.edgar import EdgarError
+
+    c = _client(monkeypatch, _Resp(403))
+
+    with pytest.raises(EdgarError):
+        c.verify_access()
+
+
+def test_missing_index_404_still_returns_empty(monkeypatch):
+    c = _client(monkeypatch, _Resp(404))
+
+    assert c.daily_form4_filings(date(2026, 8, 29)) == []

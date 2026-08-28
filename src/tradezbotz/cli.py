@@ -55,6 +55,9 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
         )
 
     client = EdgarClient()
+    # Prove the User-Agent works once, so a later 403 can be read as "index not
+    # published yet" rather than "credentials rejected". Fail fast if it doesn't.
+    client.verify_access()
     store = EventStore(DEFAULT_STATE / EVENTS_DB)
     deadline = time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
 
@@ -67,7 +70,7 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
     ]
     days.reverse()
 
-    total_new = skipped = processed = 0
+    total_new = skipped = processed = failed = 0
     for day in days:
         if deadline and time.monotonic() > deadline:
             print(f"\ntime budget reached; {len(days) - processed - skipped} days left")
@@ -75,14 +78,22 @@ def cmd_ingest_edgar(args: argparse.Namespace) -> int:
         if not args.force and store.day_ingested("sec_form4", day):
             skipped += 1
             continue
-        events = [t.to_event() for t in ingest_day(client, day)]
+        try:
+            events = [t.to_event() for t in ingest_day(client, day)]
+        except Exception as exc:  # noqa: BLE001
+            # One unavailable day must not end a multi-hour run. The day stays
+            # unmarked, so the next invocation retries it.
+            failed += 1
+            print(f"{day}  FAILED  {type(exc).__name__}: {exc}"[:160], flush=True)
+            continue
         new = store.record_many(events)
-        store.mark_day_ingested("sec_form4", day, len(events))
+        if events:
+            store.mark_day_ingested("sec_form4", day, len(events))
         total_new += new
         processed += 1
         print(f"{day}  filings->events {len(events):5d}  new {new:5d}", flush=True)
 
-    print(f"\ndays processed {processed}, already done {skipped}")
+    print(f"\ndays processed {processed}, already done {skipped}, failed {failed}")
     print(f"total new events: {total_new}")
     print(f"event store total: {store.count()}")
     store.close()

@@ -152,10 +152,24 @@ class EdgarClient:
         resp.raise_for_status()
         return resp.text
 
+    def verify_access(self) -> None:
+        """Confirm our User-Agent is accepted before interpreting any 403s.
+
+        EDGAR answers 403 -- not 404 -- for a daily index that does not exist
+        yet, which is indistinguishable from a rejected User-Agent by status
+        code alone. Checking a known-stable URL once up front removes the
+        ambiguity: after this passes, a 403 on a daily index means "not
+        published", and `daily_form4_filings` may safely skip it.
+        """
+        self._get("https://www.sec.gov/Archives/edgar/daily-index/")
+        self._access_verified = True
+
     def daily_form4_filings(self, day: date) -> list[tuple[str, str]]:
         """Return (cik, document_path) for every Form 4 filed on `day`.
 
-        Weekends and holidays have no index file; those return an empty list.
+        Weekends, holidays, and days whose index has not been published yet all
+        return an empty list. Today and often yesterday fall in that last group:
+        EDGAR publishes the daily index on a lag.
         """
         url = DAILY_INDEX.format(
             year=day.year, qtr=(day.month - 1) // 3 + 1, ymd=day.strftime("%Y%m%d")
@@ -164,6 +178,10 @@ class EdgarClient:
             body = self._get(url)
         except FileNotFoundError:
             return []
+        except EdgarError:
+            if getattr(self, "_access_verified", False):
+                return []  # index not published for this day
+            raise  # credentials never proven; a real 403 must stay loud
 
         out: list[tuple[str, str]] = []
         for line in body.splitlines():
