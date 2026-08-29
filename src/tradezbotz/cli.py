@@ -212,6 +212,37 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest_sentiment(args: argparse.Namespace) -> int:
+    """Snapshot Reddit mention counts.
+
+    ApeWisdom serves only a current snapshot -- no history exists at any price,
+    verified against the live API. So this cannot be backfilled, only
+    accumulated: every day it does not run is a day of history lost for good.
+    """
+    from .research.apewisdom import DEFAULT_FILTERS, ApeWisdomClient, to_events
+    from .research.eventstore import EventStore
+
+    client = ApeWisdomClient()
+    store = EventStore(DEFAULT_STATE / EVENTS_DB)
+    filters = args.filters or list(DEFAULT_FILTERS)
+    total = 0
+    for name in filters:
+        try:
+            mentions = client.mentions(name)
+        except Exception as exc:  # noqa: BLE001
+            # An unofficial free API must never fail the pipeline that carries
+            # the insider signal.
+            print(f"{name:16s} FAILED {type(exc).__name__}: {exc}"[:140], flush=True)
+            continue
+        new = store.record_many(list(to_events(mentions)))
+        total += new
+        print(f"{name:16s} tickers {len(mentions):5d}  new {new:5d}", flush=True)
+
+    print(f"total new sentiment events: {total}", flush=True)
+    store.close()
+    return 0
+
+
 def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     from .research.backfill import symbols_from_events
     from .research.eventstore import EventStore
@@ -357,6 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="stop before this date; defaults to the price window "
                           "start, leaving recent filings to the timed path")
     blk.set_defaults(func=cmd_ingest_bulk)
+
+    snt = sub.add_parser("ingest-sentiment",
+                         help="snapshot Reddit mention counts (accumulates only)")
+    snt.add_argument("--filters", nargs="*",
+                     help="community filters; defaults to all-stocks, "
+                          "wallstreetbets, stocks")
+    snt.set_defaults(func=cmd_ingest_sentiment)
 
     enq = sub.add_parser("enqueue-symbols",
                          help="queue symbols from events that can actually be labelled")

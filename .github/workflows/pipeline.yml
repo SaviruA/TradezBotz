@@ -98,6 +98,14 @@ jobs:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: python -m tradezbotz ingest-edgar --days 100 --max-minutes 45
 
+      # ApeWisdom serves only a current snapshot -- no history exists at any
+      # price. Sentiment can therefore never be backfilled, only accumulated,
+      # so every run that skips this loses a day permanently. Cheap (~20s) and
+      # failures are swallowed so an unofficial free API cannot break the
+      # pipeline that carries the insider signal.
+      - name: Snapshot Reddit sentiment
+        run: python -m tradezbotz ingest-sentiment
+
       - name: Queue newly seen symbols
         env:
           MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
