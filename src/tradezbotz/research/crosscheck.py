@@ -51,6 +51,25 @@ class Disagreement:
     median_rel_diff: float | None
     max_rel_diff: float | None
     verdict: Agreement
+    #: Highs and lows are compared separately because different indicators read
+    #: different fields. Bollinger and RSI use closes; ATR, Donchian and every
+    #: stop-loss read highs and lows. A source can agree on closes and still
+    #: carry a phantom high that manufactures a breakout or trips a stop --
+    #: which the Concretum provider comparison names as a top failure mode.
+    median_high_diff: float | None = None
+    median_low_diff: float | None = None
+
+    @property
+    def range_trustworthy(self) -> bool:
+        """Whether highs and lows agree well enough for ATR, Donchian or stops.
+
+        Deliberately separate from `trustworthy`: an indicator using only closes
+        may be usable on a symbol whose highs disagree, and refusing both would
+        discard usable data.
+        """
+        if self.median_high_diff is None or self.median_low_diff is None:
+            return False
+        return max(self.median_high_diff, self.median_low_diff) <= AGREE_THRESHOLD
 
     @property
     def trustworthy(self) -> bool:
@@ -70,12 +89,18 @@ def compare(primary: Series, secondary: Series) -> Disagreement:
     coverage gap, not a price disagreement, and conflating them would blame the
     wrong thing -- `labeler.coverage_report` already tracks gaps.
     """
-    b = {bar.day: bar.close for bar in secondary.bars}
-    diffs = [
-        abs(bar.close - b[bar.day]) / bar.close
-        for bar in primary.bars
-        if bar.day in b and bar.close > 0
-    ]
+    b = {bar.day: bar for bar in secondary.bars}
+    diffs, high_diffs, low_diffs = [], [], []
+    for bar in primary.bars:
+        other = b.get(bar.day)
+        if other is None:
+            continue
+        if bar.close > 0:
+            diffs.append(abs(bar.close - other.close) / bar.close)
+        if bar.high > 0:
+            high_diffs.append(abs(bar.high - other.high) / bar.high)
+        if bar.low > 0:
+            low_diffs.append(abs(bar.low - other.low) / bar.low)
 
     if len(diffs) < MIN_OVERLAP_DAYS:
         return Disagreement(
@@ -98,6 +123,8 @@ def compare(primary: Series, secondary: Series) -> Disagreement:
         median_rel_diff=median,
         max_rel_diff=max(diffs),
         verdict=verdict,
+        median_high_diff=statistics.median(high_diffs) if high_diffs else None,
+        median_low_diff=statistics.median(low_diffs) if low_diffs else None,
     )
 
 
@@ -117,4 +144,10 @@ def summarise(results: list[Disagreement]) -> dict[str, float | int]:
         "disagree": counts[Agreement.DISAGREE],
         "insufficient_overlap": counts[Agreement.INSUFFICIENT_OVERLAP],
         "trustworthy_rate": counts[Agreement.AGREE] / len(results),
+        # Tracked separately: a symbol can agree on closes while its highs
+        # disagree, which is safe for Bollinger and RSI but not for ATR,
+        # Donchian or any stop-loss.
+        "range_trustworthy": sum(1 for r in results if r.range_trustworthy),
+        "range_trustworthy_rate":
+            sum(1 for r in results if r.range_trustworthy) / len(results),
     }
