@@ -180,3 +180,43 @@ def test_events_are_storable(tmp_path):
     with EventStore(tmp_path / "e.db") as store:
         assert store.record_many(list(to_events([mention()], NOW))) == 1
         assert store.record_many(list(to_events([mention()], NOW))) == 0
+
+
+# --- data quality flagging ---------------------------------------------------
+
+def test_ambiguous_tickers_are_flagged_in_the_payload():
+    """8 of the top 100 WSB tickers were ordinary English words when measured.
+    Flagged, not filtered: excluding them would bias the universe as badly as
+    trusting them, since a genuine ServiceNow discussion is real signal."""
+    it = next(to_events([mention(ticker="IT")], NOW))
+    nvda = next(to_events([mention(ticker="NVDA")], NOW))
+
+    assert it.payload["ambiguous_ticker"] is True
+    assert nvda.payload["ambiguous_ticker"] is False
+
+
+def test_ambiguity_report_quantifies_contamination():
+    from tradezbotz.research.apewisdom import ambiguity_report
+
+    rep = ambiguity_report([
+        mention(ticker="NVDA", mentions=300),
+        mention(ticker="IT", mentions=100),
+    ])
+
+    assert rep["tickers"] == 2
+    assert rep["ambiguous_tickers"] == 1
+    assert rep["ambiguous_ticker_rate"] == pytest.approx(0.5)
+    assert rep["ambiguous_mention_share"] == pytest.approx(0.25)
+
+
+def test_ambiguity_report_handles_empty():
+    from tradezbotz.research.apewisdom import ambiguity_report
+
+    assert ambiguity_report([]) == {"total": 0}
+
+
+def test_known_english_word_tickers_are_listed():
+    from tradezbotz.research.apewisdom import AMBIGUOUS_TICKERS
+
+    for t in ("IT", "ALL", "SO", "ON", "BE", "ANY", "NOW", "OPEN", "DD"):
+        assert t in AMBIGUOUS_TICKERS

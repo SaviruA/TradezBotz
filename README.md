@@ -149,6 +149,37 @@ each daily file is a snapshot of everything that traded that day, which is
 survivorship-bias-free by construction. It is the obvious first thing to pay
 for if this project earns it.
 
+## How much to trust each source
+
+The axis that matters is **primary vs derived**, not free vs paid. SEC EDGAR is
+free and unauthenticated and also authoritative — it *is* the record. ApeWisdom
+is the only source here where someone else's undocumented judgment sits between
+us and the raw data.
+
+| Source | Type | Trust |
+|---|---|---|
+| SEC EDGAR / Form 345 bulk | primary | high — coverage verified equal to per-filing |
+| Massive prices | vendor, licensed | medium — IEX-only ghost prices on thin names |
+| Reddit dumps (Arctic Shift, Academic Torrents) | near-primary | medium — documented bursty gaps |
+| **ApeWisdom** | **derived** | **low — convenience feed, never ground truth** |
+
+**Measured, not assumed.** On 2026-08-29, 8 of the top 100 r/wallstreetbets
+tickers were ordinary English words — `NOW`, `ALL`, `IT`, `OPEN`, `BE`, `ON`,
+`SO`, `ANY`. Across all 673 tickers that is 3.7% of tickers and 3.5% of
+mentions. These are flagged per event (`ambiguous_ticker`) and summarised by
+`ambiguity_report()` rather than filtered: excluding them would bias the universe
+as badly as trusting them, since a genuine ServiceNow discussion is real signal.
+
+There is no clean fix. Requiring a `$` prefix buys precision at ruinous recall —
+only 13.4% of $GME mentions carry the dollar sign
+([arXiv:2105.02728](https://arxiv.org/pdf/2105.02728)). Every mention counter
+picks a point on that curve; ApeWisdom picks one invisibly.
+
+The underlying Reddit archive also has **bursty** gaps: 36M comments and 28M
+submissions missing by June 2017, clustered around high-activity events
+([Gaffney & Matias, PLOS ONE 2018](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0200162)).
+The data is thinnest exactly when a sentiment signal would fire.
+
 ## Setup
 
 ```bash

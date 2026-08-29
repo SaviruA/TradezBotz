@@ -17,7 +17,47 @@ The upside of building the archive ourselves is that the timestamps are
 honest: `observed_at` is the moment we fetched, so a future backtest inherits
 the point-in-time property that purchased sentiment history usually lacks.
 
-Two cautions carried forward for whoever eventually tests this:
+DATA QUALITY -- READ BEFORE TRUSTING ANY OF THIS
+================================================
+
+This is the only **derived** source in the project. SEC EDGAR is primary: it
+*is* the record, so "free and unauthenticated" says nothing bad about it. Here
+somebody else's undocumented judgment sits between us and the raw text, and that
+judgment is demonstrably imperfect.
+
+**1. Ticker extraction is contaminated, measured.** On 2026-08-29, 8 of the top
+100 r/wallstreetbets tickers were ordinary English words:
+
+    NOW 26   ALL 9   IT 8   OPEN 8   BE 5   ON 3   SO 3   ANY 3
+
+"IT" on a discussion forum is not Gartner. Roughly 8% of the ranked universe
+carries counts of unknown validity, and we cannot inspect or correct the
+extractor that produced them. See `AMBIGUOUS_TICKERS` and `ambiguity_report`.
+
+**2. There is no clean fix, only a trade-off.** Requiring a `$` prefix buys
+precision at ruinous cost to recall: only 13.4% of $GME mentions and 11.6% of
+$MSFT mentions actually carry the dollar sign (Buz & de Melo, arXiv:2105.02728).
+Every mention counter must pick a point on that curve. ApeWisdom picks one
+invisibly.
+
+**3. The underlying Reddit archive has non-random gaps.** Gaffney & Matias,
+"Caveat emptor, computational social science" (PLOS ONE 2018), audited the
+Pushshift corpus via Reddit's sequential IDs: 36 million comments and 28 million
+submissions missing by June 2017, ~4.18% of users missing at least one comment.
+
+Crucially the gaps are **bursty** -- clustered around high-activity events rather
+than spread evenly. The data is thinnest exactly when attention spikes, which is
+when a sentiment signal would fire. Their risk tiers place mention-counting in
+the middle one: "moderate risk to research that compares counts of
+participation".
+
+**Consequence.** Treat this feed as a convenience signal, never as ground truth.
+Serious evaluation should compute mentions from raw dumps (Arctic Shift, or the
+per-subreddit Academic Torrents archives) with an extractor we wrote, can audit,
+and can re-run deterministically. Arctic Shift itself is community-run: no SLA,
+no uptime guarantee, completeness not guaranteed for removed or recent content.
+
+Two further cautions for whoever eventually tests this:
 
 * **Reverse causality dominates.** NVDA has 303 mentions partly *because* it
   moved. Any evaluation must control for contemporaneous and lagged returns, or
@@ -54,6 +94,44 @@ REQUEST_INTERVAL_SECONDS = 1.0
 #: Pagination guard: the API reports its own page count, but a malformed
 #: response must not spin forever.
 MAX_PAGES = 25
+
+#: Tickers that are also ordinary English or WSB slang, so their mention counts
+#: are unreliable from any extractor that does not require a `$` prefix. Every
+#: entry here is a real listed symbol -- the problem is that the word is far
+#: more common than the company.
+#:
+#: Not a filter. Excluding them would bias the universe just as badly as
+#: trusting them; a genuine ServiceNow discussion is real signal. They are
+#: flagged so contamination is *countable* rather than invisible, the same way
+#: labeller coverage and delistings are counted instead of dropped.
+AMBIGUOUS_TICKERS: frozenset[str] = frozenset({
+    # measured live in the top 100 on 2026-08-29
+    "NOW", "ALL", "IT", "OPEN", "BE", "ON", "SO", "ANY",
+    # same failure mode, seen in the wider list
+    "A", "GO", "REAL", "PLAY", "EAT", "CAKE", "TRUE", "WELL", "HOPE", "LOVE",
+    "FREE", "BIG", "RUN", "CASH", "OR", "AT", "BY", "IF", "NEW", "OUT", "TWO",
+    "CAN", "MAN", "SEE", "SAFE", "GOOD", "BEST", "FAST", "TELL", "STAY", "TURN",
+    # WSB slang that collides with real symbols
+    "DD", "YOLO", "MOON", "APE", "HOOD",
+})
+
+
+def ambiguity_report(mentions: Sequence["Mention"]) -> dict[str, float | int]:
+    """How much of a snapshot rests on ambiguous tickers.
+
+    Report this beside any sentiment result. A signal driven by "IT" and "ALL"
+    is measuring English, not attention.
+    """
+    if not mentions:
+        return {"total": 0}
+    flagged = [m for m in mentions if m.ticker in AMBIGUOUS_TICKERS]
+    total_mentions = sum(m.mentions for m in mentions) or 1
+    return {
+        "tickers": len(mentions),
+        "ambiguous_tickers": len(flagged),
+        "ambiguous_ticker_rate": len(flagged) / len(mentions),
+        "ambiguous_mention_share": sum(m.mentions for m in flagged) / total_mentions,
+    }
 
 
 class ApeWisdomError(RuntimeError):
@@ -184,5 +262,8 @@ def to_events(
                 "rank_24h_ago": m.rank_24h_ago,
                 "mentions_24h_ago": m.mentions_24h_ago,
                 "mention_change": m.mention_change,
+                # Stored per event so a future backtest can exclude or
+                # sensitivity-test these without re-deriving the list.
+                "ambiguous_ticker": m.ticker in AMBIGUOUS_TICKERS,
             },
         )
