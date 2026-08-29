@@ -163,6 +163,35 @@ us and the raw data.
 | Reddit dumps (Arctic Shift, Academic Torrents) | near-primary | medium — documented bursty gaps |
 | **ApeWisdom** | **derived** | **low — convenience feed, never ground truth** |
 
+### The two price sources disagree on corporate actions
+
+`tradezbotz crosscheck` over 203 cached symbols: **only 54.2% agree**, 45 of 203
+disagree materially. The cause is not IEX illiquidity, which is what Alpaca was
+added to guard against.
+
+```
+BDX   2024-08-29  massive 240.97  alpaca 181.20  +24.80%   ratio 1.330
+      2026-08-27  massive 188.13  alpaca 188.13   +0.00%
+XELB  2024-08-29  massive   7.03  alpaca  21.11  -200.4%   ratio 3.004
+      2026-08-27  massive   0.94  alpaca   0.95   -1.26%
+```
+
+A constant historical offset converging to exact present-day agreement is the
+signature of a split or spinoff that one source back-adjusted and the other did
+not. XELB's ratio is a clean 3.004 (3:1). BDX is large-cap S&P 500, so liquidity
+cannot explain 24.8%. Both sources were asked for adjusted data and still
+disagree.
+
+An unadjusted series **manufactures** returns across the adjustment date — a
+5-day window spanning XELB's split reads as ~200% that never happened. So:
+
+1. Never mix the two sources inside one return calculation.
+2. Massive is the system of record for returns; Alpaca is a cross-check.
+3. Alpaca's deeper history (back to ~2020-07-27) is not safely usable for windows
+   spanning a corporate action until adjustment is reconciled.
+4. **Which source is correct is unestablished** and needs a third reference.
+   Massive is not assumed right merely for being primary.
+
 **Measured, not assumed.** On 2026-08-29, 8 of the top 100 r/wallstreetbets
 tickers were ordinary English words — `NOW`, `ALL`, `IT`, `OPEN`, `BE`, `ON`,
 `SO`, `ANY`. Across all 673 tickers that is 3.7% of tickers and 3.5% of
