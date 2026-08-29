@@ -107,8 +107,21 @@ class BacktestResult:
     significant: bool
     n_symbols: int = 0
     top_symbol_share: float = 0.0
+    mean_return_winsorised: float = 0.0
     coverage: dict = field(default_factory=dict)
     notes: str = ""
+
+    @property
+    def outlier_dependent(self) -> bool:
+        """Whether the result leans on a few extreme observations.
+
+        If capping returns at ±15% halves the mean, the edge lives in the tail
+        rather than the population -- and on this data a tail observation is as
+        likely to be a phantom print as a real move.
+        """
+        if self.mean_return == 0:
+            return False
+        return abs(self.mean_return_winsorised / self.mean_return) < 0.5
 
     @property
     def clustered(self) -> bool:
@@ -140,6 +153,24 @@ class BacktestResult:
                 if self.clustered else ""
             )
         )
+
+
+#: Winsorisation bound for the sensitivity check. Welch ("Stock Return
+#: Outliers") recommends ±10-15% for CRSP stocks, finding that winsorised
+#: standard deviations and betas predict their own future realisations better
+#: than unwinsorised ones, with no gain from deleting observations instead.
+#:
+#: We report winsorised *alongside* raw rather than replacing it. On the small
+#: caps where insider buying concentrates, a 15% five-day move is frequently
+#: genuine, so silently capping would discard real outcomes. A large gap
+#: between the two means the result rests on a handful of extreme observations
+#: -- which is a finding about fragility, not a number to quietly fix.
+WINSOR_LIMIT = 0.15
+
+
+def winsorise(xs: Sequence[float], limit: float = WINSOR_LIMIT) -> list[float]:
+    """Cap values at ±limit, keeping every observation."""
+    return [max(-limit, min(limit, x)) for x in xs]
 
 
 def _moments(xs: Sequence[float]) -> tuple[float, float]:
@@ -211,6 +242,7 @@ def run(
     top_share = (counts.most_common(1)[0][1] / len(returns)) if counts else 0.0
 
     mean = statistics.fmean(returns)
+    mean_w = statistics.fmean(winsorise(returns))
     sd = statistics.stdev(returns)
     skew, kurt = _moments(returns)
     sharpe_trade = mean / sd if sd > 0 else 0.0
@@ -243,6 +275,7 @@ def run(
         n_trials=int(verdict["n_trials"]),
         significant=bool(verdict["significant"]),
         n_symbols=n_symbols, top_symbol_share=top_share,
+        mean_return_winsorised=mean_w,
         coverage=coverage,
     )
 
@@ -259,14 +292,15 @@ def compare(results: Sequence[BacktestResult]) -> str:
         return "no results"
     header = (
         f"{'hypothesis':<34}{'trades':>8}{'mean':>9}{'hit':>7}"
-        f"{'t':>7}{'DSR':>7}{'syms':>6}  verdict"
+        f"{'t':>7}{'DSR':>7}{'syms':>6}{'wins':>9}  verdict"
     )
     lines = [header, "-" * len(header)]
     for r in results:
         lines.append(
             f"{r.hypothesis[:33]:<34}{r.n_trades:>8,}{r.mean_return:>+9.3%}"
             f"{r.hit_rate:>7.1%}{r.t_stat:>+7.2f}{r.deflated_sharpe:>7.3f}"
-            f"{r.n_symbols:>6}"
+            f"{r.n_symbols:>6}{r.mean_return_winsorised:>+9.3%}"
             f"  {'CLUSTERED' if r.clustered else ('SIGNIFICANT' if r.significant else '-')}"
+            f"{'  OUTLIER-DEP' if r.outlier_dependent else ''}"
         )
     return "\n".join(lines)

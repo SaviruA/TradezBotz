@@ -309,3 +309,37 @@ def test_small_samples_are_not_called_clustered(reg):
     res = run(labels, payloads, hypothesis="tiny", rationale="r", registry=reg)
 
     assert res.clustered is False
+
+
+# --- winsorisation sensitivity ------------------------------------------------
+
+def test_winsorise_caps_without_deleting():
+    from tradezbotz.research.backtest import winsorise
+
+    out = winsorise([0.02, 0.9, -0.8, -0.01], limit=0.15)
+
+    assert out == [0.02, 0.15, -0.15, -0.01]
+    assert len(out) == 4, "observations are capped, never removed"
+
+
+def test_result_flags_dependence_on_a_few_extremes(reg):
+    """Welch finds winsorised estimates predict better than raw, but capping
+    silently would discard genuine small-cap moves. Reporting both exposes when
+    an edge lives in the tail rather than the population."""
+    payloads = [{"k": 1}] * 200
+    labels = [label(0.0) for _ in range(199)] + [label(4.0)]
+
+    res = run(labels, payloads, hypothesis="tail", rationale="r", registry=reg)
+
+    assert res.mean_return > res.mean_return_winsorised
+    assert res.outlier_dependent is True
+
+
+def test_broad_edge_is_not_flagged_as_outlier_dependent(reg):
+    rng = random.Random(9)
+    payloads = [{"k": 1}] * 300
+    labels = [label(rng.gauss(0.01, 0.02)) for _ in range(300)]
+
+    res = run(labels, payloads, hypothesis="broad", rationale="r", registry=reg)
+
+    assert res.outlier_dependent is False
