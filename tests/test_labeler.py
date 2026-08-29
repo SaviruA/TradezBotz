@@ -193,14 +193,19 @@ def test_each_symbol_is_fetched_once_regardless_of_event_count():
     assert sorted(src.calls) == ["AAPL", "MSFT"]
 
 
-def test_events_without_a_symbol_are_skipped():
+def test_events_without_a_symbol_are_labelled_not_dropped():
+    """Changed deliberately. Dropping them shortened the output and broke
+    positional alignment with the input, which silently mispaired every
+    downstream payload. An unlabellable event is NO_DATA, not absent."""
     src = FakeSource()
     labels = Labeller(src).label(
         [{"symbol": None, "observed_at": et(2025, 3, 4, 18, 0)},
          {"symbol": "AAPL", "observed_at": et(2025, 3, 4, 18, 0)}]
     )
 
-    assert len(labels) == 1
+    assert len(labels) == 2
+    assert labels[0].coverage is Coverage.NO_DATA
+    assert labels[1].symbol == "AAPL"
 
 
 def test_iso_string_timestamps_are_accepted():
@@ -210,3 +215,54 @@ def test_iso_string_timestamps_are_accepted():
     )
 
     assert labels[0].entry_day == date(2025, 3, 5)
+
+
+# --- input alignment ---------------------------------------------------------
+
+def test_labels_are_aligned_to_input_order():
+    """Regression: labels were returned grouped by symbol, so zipping them with
+    the input paired every label to the wrong event. Downstream this made every
+    backtest selector return identical results -- silently, because both lists
+    were the right length."""
+    src = FakeSource()
+    events = [
+        {"symbol": "AAA", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "BBB", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "AAA", "observed_at": et(2025, 3, 5, 18)},
+        {"symbol": "CCC", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "BBB", "observed_at": et(2025, 3, 6, 18)},
+    ]
+
+    labels = Labeller(src).label(events)
+
+    assert [e["symbol"] for e in events] == [lab.symbol for lab in labels]
+
+
+def test_alignment_holds_when_a_symbol_is_missing():
+    """Events without a symbol are labelled NO_DATA, not dropped, so index
+    correspondence survives."""
+    src = FakeSource()
+    events = [
+        {"symbol": "AAA", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": None, "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "BBB", "observed_at": et(2025, 3, 4, 18)},
+    ]
+
+    labels = Labeller(src).label(events)
+
+    assert len(labels) == 3
+    assert labels[1].coverage is Coverage.NO_DATA
+    assert labels[0].symbol == "AAA" and labels[2].symbol == "BBB"
+
+
+def test_each_symbol_still_fetched_once_after_the_ordering_fix():
+    src = FakeSource()
+    events = [
+        {"symbol": "AAA", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "BBB", "observed_at": et(2025, 3, 4, 18)},
+        {"symbol": "AAA", "observed_at": et(2025, 3, 5, 18)},
+    ]
+
+    Labeller(src).label(events)
+
+    assert sorted(src.calls) == ["AAA", "BBB"]

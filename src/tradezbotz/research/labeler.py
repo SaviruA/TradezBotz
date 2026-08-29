@@ -169,28 +169,45 @@ class Labeller:
     def label(self, events: Iterable[dict]) -> list[Label]:
         """Label events, where each event has `symbol` and `observed_at`.
 
-        Events are grouped by symbol so one fetch serves every event on that
-        ticker -- the difference between a ten-hour backfill and a ten-day one
-        at 5 requests per minute.
+        **The result is aligned to the input**: `labels[i]` describes `events[i]`.
+        Fetching is grouped by symbol -- one request serves every event on that
+        ticker, the difference between a ten-hour backfill and a ten-day one at
+        5 requests/minute -- but results are written back by original index.
+
+        Returning labels in symbol-grouped order instead silently pairs each
+        label with the wrong event downstream. That bug made every selector in
+        the backtest engine return identical results, because the payloads and
+        labels no longer described the same trade.
+
+        Events without a symbol are labelled NO_DATA rather than dropped, so
+        positional alignment always holds.
         """
-        by_symbol: dict[str, list[datetime]] = {}
-        for e in events:
+        events = list(events)
+        by_symbol: dict[str, list[tuple[int, datetime]]] = {}
+        out: list[Label | None] = [None] * len(events)
+
+        for i, e in enumerate(events):
             symbol = (e.get("symbol") or "").upper()
-            if not symbol:
-                continue
-            observed = e["observed_at"]
+            observed = e.get("observed_at")
             if isinstance(observed, str):
                 observed = datetime.fromisoformat(observed)
-            by_symbol.setdefault(symbol, []).append(observed)
+            if not symbol or observed is None:
+                out[i] = Label(
+                    symbol=symbol, observed_at=observed, entry_day=None,
+                    entry_price=None, returns={}, coverage=Coverage.NO_DATA,
+                )
+                continue
+            by_symbol.setdefault(symbol, []).append((i, observed))
 
-        out: list[Label] = []
-        for symbol, times in by_symbol.items():
+        for symbol, items in by_symbol.items():
+            times = [t for _, t in items]
             start = min(times).date()
             end = _pad_end(max(times).date(), max(self.horizons))
             series = self.source.daily_bars(symbol, start, end)
-            for t in times:
-                out.append(label_event(series, t, horizons=self.horizons))
-        return out
+            for i, t in items:
+                out[i] = label_event(series, t, horizons=self.horizons)
+
+        return [lab for lab in out if lab is not None]
 
 
 def _pad_end(last_event_day: date, longest_horizon: int) -> date:

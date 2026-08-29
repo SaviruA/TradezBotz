@@ -1,0 +1,272 @@
+"""Event-study backtesting, wired to the trial registry.
+
+Turns labelled events into an answer, with the statistics that make the answer
+mean something.
+
+**Selectors compose, deliberately.** A signal with no standalone edge can still
+carry information in combination -- insider buying *conditioned on* elevated
+sentiment is a different hypothesis from either alone. Dropping a weak signal
+destroys that combination before it can be measured, so nothing is filtered out
+in advance; `all_of`, `any_of` and `threshold` exist to make combinations as easy
+to test as singles.
+
+**Every run registers a trial, including the ones that look bad.** Testing
+everything raises the trial count and therefore the Deflated Sharpe bar. That is
+the honest cost. The dishonest alternative is testing everything and reporting
+only the winners, which is what actually corrupts a result.
+
+**Why the Sharpe here is per-trade, not per-day.** The labeller stores the return
+at each horizon, not the daily path between entry and exit, so a genuine daily
+portfolio series cannot be reconstructed without refetching every intermediate
+bar. Treating each trade as one observation is the standard event-study approach
+and it feeds the DSR coherently: n_obs is the trade count, and the question
+becomes "is this trade-level edge distinguishable from selection noise across N
+trials?" -- which is exactly what we want to know. `sharpe_annualised` is derived
+from observed trade frequency for human intuition only; never feed it to the DSR.
+"""
+
+from __future__ import annotations
+
+import math
+import statistics
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Sequence
+
+from .labeler import Coverage, Label
+from .trials import TrialRegistry, assess
+
+#: An event is (payload, label). Returns True to take the trade.
+Selector = Callable[[dict, Label], bool]
+
+TRADING_DAYS = 252
+
+
+# --- selector combinators ----------------------------------------------------
+
+def all_of(*selectors: Selector) -> Selector:
+    """Conjunction: every condition must hold. The usual way to test whether
+    two weak signals are stronger together."""
+    def sel(payload: dict, label: Label) -> bool:
+        return all(s(payload, label) for s in selectors)
+    return sel
+
+
+def any_of(*selectors: Selector) -> Selector:
+    """Disjunction: widens the population rather than narrowing it."""
+    def sel(payload: dict, label: Label) -> bool:
+        return any(s(payload, label) for s in selectors)
+    return sel
+
+
+def negate(selector: Selector) -> Selector:
+    """The complement -- useful as a control group. If a signal works, its
+    inverse should not."""
+    def sel(payload: dict, label: Label) -> bool:
+        return not selector(payload, label)
+    return sel
+
+
+def field_equals(key: str, value: object) -> Selector:
+    def sel(payload: dict, label: Label) -> bool:
+        return payload.get(key) == value
+    return sel
+
+
+def threshold(key: str, minimum: float) -> Selector:
+    def sel(payload: dict, label: Label) -> bool:
+        v = payload.get(key)
+        return isinstance(v, (int, float)) and v >= minimum
+    return sel
+
+
+def everything(payload: dict, label: Label) -> bool:
+    """Baseline: trade every labelled event. Any real signal must beat this."""
+    return True
+
+
+# --- results -----------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BacktestResult:
+    hypothesis: str
+    horizon: int
+    trial_id: int
+    n_events: int
+    n_trades: int
+    mean_return: float
+    median_return: float
+    stdev: float
+    hit_rate: float
+    sharpe_per_trade: float
+    sharpe_annualised: float
+    t_stat: float
+    skew: float
+    kurtosis: float
+    deflated_sharpe: float
+    n_trials: int
+    significant: bool
+    n_symbols: int = 0
+    top_symbol_share: float = 0.0
+    coverage: dict = field(default_factory=dict)
+    notes: str = ""
+
+    @property
+    def clustered(self) -> bool:
+        """Whether observations are too concentrated for the t-stat to mean much.
+
+        Overlapping events on one symbol are not independent draws: 154 filings
+        on a $1.84 micro-cap trace one price path, not 154 outcomes. Both the
+        t-stat and the DSR assume independence, so a clustered sample inflates
+        both. Effective sample size is nearer the count of distinct
+        symbol-episodes than the trade count.
+        """
+        if self.n_trades < 30 or self.n_symbols == 0:
+            return False
+        return (self.n_trades / self.n_symbols) > 5 or self.top_symbol_share > 0.15
+
+    def summary(self) -> str:
+        return (
+            f"{self.hypothesis}  h={self.horizon}\n"
+            f"  trades {self.n_trades:,} of {self.n_events:,} labelled events\n"
+            f"  mean {self.mean_return:+.3%}  median {self.median_return:+.3%}  "
+            f"hit {self.hit_rate:.1%}\n"
+            f"  t-stat {self.t_stat:+.2f}  Sharpe/trade {self.sharpe_per_trade:+.3f}\n"
+            f"  DSR {self.deflated_sharpe:.3f} across {self.n_trials} trials  "
+            f"-> {'SIGNIFICANT' if self.significant else 'not significant'}"
+            + (
+                f"\n  WARNING: clustered -- {self.n_trades:,} trades over only "
+                f"{self.n_symbols} symbols, top symbol {self.top_symbol_share:.0%}. "
+                "t-stat and DSR assume independence; treat as unreliable."
+                if self.clustered else ""
+            )
+        )
+
+
+def _moments(xs: Sequence[float]) -> tuple[float, float]:
+    """Sample skew and kurtosis. The DSR needs both: fat tails and negative
+    skew both make an extreme Sharpe easier to reach by luck."""
+    n = len(xs)
+    if n < 4:
+        return 0.0, 3.0
+    mean = statistics.fmean(xs)
+    sd = statistics.pstdev(xs)
+    if sd == 0:
+        return 0.0, 3.0
+    m3 = sum((x - mean) ** 3 for x in xs) / n
+    m4 = sum((x - mean) ** 4 for x in xs) / n
+    return m3 / sd**3, m4 / sd**4
+
+
+def run(
+    labels: Iterable[Label],
+    payloads: Iterable[dict],
+    *,
+    hypothesis: str,
+    rationale: str,
+    registry: TrialRegistry,
+    selector: Selector = everything,
+    horizon: int = 5,
+    partition: str = "train",
+    trades_per_year: float | None = None,
+) -> BacktestResult:
+    """Measure one hypothesis over labelled events.
+
+    The trial is registered *before* the result is known, so an experiment
+    abandoned midway still counts against N.
+    """
+    trial_id = registry.register(
+        hypothesis,
+        rationale,
+        params={"horizon": horizon, "partition": partition},
+        split=partition,
+    )
+
+    pairs = list(zip(payloads, labels))
+    coverage = {c.value: 0 for c in Coverage}
+    returns: list[float] = []
+    symbols: list[str] = []
+    for payload, label in pairs:
+        coverage[label.coverage.value] += 1
+        if horizon not in label.returns:
+            continue
+        if selector(payload, label):
+            returns.append(label.returns[horizon])
+            symbols.append(label.symbol)
+
+    n = len(returns)
+    if n < 2:
+        registry.abandon(trial_id, f"only {n} qualifying trades")
+        return BacktestResult(
+            hypothesis=hypothesis, horizon=horizon, trial_id=trial_id,
+            n_events=len(pairs), n_trades=n, mean_return=0.0, median_return=0.0,
+            stdev=0.0, hit_rate=0.0, sharpe_per_trade=0.0, sharpe_annualised=0.0,
+            t_stat=0.0, skew=0.0, kurtosis=3.0, deflated_sharpe=0.0,
+            n_trials=registry.count(), significant=False, coverage=coverage,
+            notes="insufficient trades to measure",
+        )
+
+    from collections import Counter
+    counts = Counter(symbols)
+    n_symbols = len(counts)
+    top_share = (counts.most_common(1)[0][1] / len(returns)) if counts else 0.0
+
+    mean = statistics.fmean(returns)
+    sd = statistics.stdev(returns)
+    skew, kurt = _moments(returns)
+    sharpe_trade = mean / sd if sd > 0 else 0.0
+    t_stat = sharpe_trade * math.sqrt(n)
+
+    # Annualisation is presentational only. Without a supplied trade frequency,
+    # assume each position is held `horizon` sessions and capital recycles.
+    per_year = trades_per_year or (TRADING_DAYS / max(horizon, 1))
+    sharpe_annual = sharpe_trade * math.sqrt(per_year)
+
+    verdict = assess(
+        registry, observed_sharpe_annual=sharpe_annual, n_obs=n,
+        skew=skew, kurtosis=kurt, periods_per_year=int(per_year) or 1,
+    )
+
+    registry.complete(
+        trial_id, sharpe=sharpe_trade, n_obs=n, n_trades=n,
+        skew=skew, kurtosis=kurt,
+        notes=f"mean={mean:.5f} hit={sum(1 for r in returns if r > 0)/n:.3f}",
+    )
+
+    return BacktestResult(
+        hypothesis=hypothesis, horizon=horizon, trial_id=trial_id,
+        n_events=len(pairs), n_trades=n,
+        mean_return=mean, median_return=statistics.median(returns), stdev=sd,
+        hit_rate=sum(1 for r in returns if r > 0) / n,
+        sharpe_per_trade=sharpe_trade, sharpe_annualised=sharpe_annual,
+        t_stat=t_stat, skew=skew, kurtosis=kurt,
+        deflated_sharpe=float(verdict["deflated_sharpe"]),
+        n_trials=int(verdict["n_trials"]),
+        significant=bool(verdict["significant"]),
+        n_symbols=n_symbols, top_symbol_share=top_share,
+        coverage=coverage,
+    )
+
+
+def compare(results: Sequence[BacktestResult]) -> str:
+    """Tabulate several hypotheses side by side.
+
+    Always show the baseline and the control alongside a candidate: a signal
+    that does not beat "trade everything" has not demonstrated anything, and one
+    whose negation performs equally well is measuring the population, not the
+    signal.
+    """
+    if not results:
+        return "no results"
+    header = (
+        f"{'hypothesis':<34}{'trades':>8}{'mean':>9}{'hit':>7}"
+        f"{'t':>7}{'DSR':>7}{'syms':>6}  verdict"
+    )
+    lines = [header, "-" * len(header)]
+    for r in results:
+        lines.append(
+            f"{r.hypothesis[:33]:<34}{r.n_trades:>8,}{r.mean_return:>+9.3%}"
+            f"{r.hit_rate:>7.1%}{r.t_stat:>+7.2f}{r.deflated_sharpe:>7.3f}"
+            f"{r.n_symbols:>6}"
+            f"  {'CLUSTERED' if r.clustered else ('SIGNIFICANT' if r.significant else '-')}"
+        )
+    return "\n".join(lines)
