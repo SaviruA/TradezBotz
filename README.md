@@ -185,12 +185,22 @@ disagree.
 An unadjusted series **manufactures** returns across the adjustment date — a
 5-day window spanning XELB's split reads as ~200% that never happened. So:
 
+**Neither source is the culprit.** Both correctly adjusted XELB's documented
+1-for-10 split; they diverge on a *different* action around 2025-12-24 that
+Massive's splits endpoint does not list. And both vendors have persistent,
+documented adjustment bugs: Polygon/Massive
+([issue #311](https://github.com/polygon-io/issues/issues/311)) ships 216
+duplicate split entries producing "totally incorrect adjusted OHLCV data";
+Alpaca's forums report the adjustment parameter returning identical results for
+`raw`/`split`/`all`, and spin-off share counts used as split ratios.
+
 1. Never mix the two sources inside one return calculation.
-2. Massive is the system of record for returns; Alpaca is a cross-check.
-3. Alpaca's deeper history (back to ~2020-07-27) is not safely usable for windows
-   spanning a corporate action until adjustment is reconciled.
-4. **Which source is correct is unestablished** and needs a third reference.
-   Massive is not assumed right merely for being primary.
+2. **Do not assume either is correct.** Neither is clean.
+3. **Trade only where they agree.** Two independently maintained sources
+   converging is real evidence; divergence flags a name where at least one is
+   broken and we cannot tell which. That currently keeps 110 of 203 symbols.
+4. `crosscheck` is a gate, not a validation of one vendor � its job is finding
+   names where nobody can be trusted.
 
 **Measured, not assumed.** On 2026-08-29, 8 of the top 100 r/wallstreetbets
 tickers were ordinary English words — `NOW`, `ALL`, `IT`, `OPEN`, `BE`, `ON`,
