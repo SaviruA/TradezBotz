@@ -324,6 +324,63 @@ def _run_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_crosscheck(args: argparse.Namespace) -> int:
+    """Compare Massive against Alpaca on symbols we already hold.
+
+    Free data ships without error bars: a single source returns a close for an
+    illiquid micro-cap with exactly the same confidence as one for Apple.
+    Two independent sources supply the missing information -- where they agree
+    the bar is probably fine, where they diverge the name is too thin for either
+    to be trusted.
+
+    This decides whether Alpaca's deeper history (7+ years, against Massive's 2)
+    is usable for the slow indicators, rather than assuming either way.
+    """
+    from .research.crosscheck import compare, summarise
+    from .research.prices import AlpacaPriceSource, PriceCache
+
+    cache = PriceCache(DEFAULT_STATE / BARS_DB)
+    symbols = cache.symbols()[: args.limit] if args.limit else cache.symbols()
+    if not symbols:
+        print("no cached symbols to compare; run backfill first")
+        return 1
+
+    alpaca = AlpacaPriceSource(per_minute=args.per_minute)
+    end = date.today()
+    start = end - timedelta(days=PRICE_WINDOW_DAYS)
+
+    results, worst = [], []
+    for i, symbol in enumerate(symbols, 1):
+        primary = cache.get(symbol, start, end)
+        if not primary.bars:
+            continue
+        try:
+            secondary = alpaca.daily_bars(symbol, start, end)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {symbol:8s} fetch failed: {type(exc).__name__}", flush=True)
+            continue
+        d = compare(primary, secondary)
+        results.append(d)
+        if d.median_rel_diff and d.median_rel_diff > 0.02:
+            worst.append(d)
+        if i % 25 == 0:
+            print(f"  ...{i}/{len(symbols)}", flush=True)
+
+    print()
+    for k, v in summarise(results).items():
+        print(f"  {k:22s} {v:.3f}" if isinstance(v, float) else f"  {k:22s} {v}")
+
+    if worst:
+        print(f"\n  {len(worst)} symbols where the sources materially disagree:")
+        for d in sorted(worst, key=lambda x: -(x.median_rel_diff or 0))[:15]:
+            print(f"    {d.symbol:8s} median {d.median_rel_diff:6.2%}  "
+                  f"max {d.max_rel_diff:6.2%}  over {d.overlapping_days} days")
+        print("\n  Treat these as low-confidence: exclude them in a sensitivity")
+        print("  check rather than silently trusting either source.")
+    cache.close()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     from .research.eventstore import EventStore
     from .research.prices import PriceCache
@@ -408,6 +465,13 @@ def build_parser() -> argparse.ArgumentParser:
     bf.add_argument("--limit", type=int, help="stop after N symbols this run")
     bf.add_argument("--per-minute", type=int, help="override the request budget")
     bf.set_defaults(func=cmd_backfill)
+
+    xc = sub.add_parser("crosscheck",
+                        help="compare Massive vs Alpaca on cached symbols")
+    xc.add_argument("--limit", type=int, help="stop after N symbols")
+    xc.add_argument("--per-minute", type=int, default=180,
+                    help="Alpaca allows 200/min on the free plan")
+    xc.set_defaults(func=cmd_crosscheck)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)
