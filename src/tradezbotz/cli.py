@@ -167,7 +167,13 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
         deadline = (
             time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
         )
-        for year, quarter in quarters_between(start, min(end, cutoff)):
+        # Newest quarter first. quarters_between returns oldest-first, and a
+        # time-boxed run then spends its whole budget on deep baselines and
+        # never reaches the labelling window -- which is the only part that
+        # yields measurable results. Run #2 loaded 2021Q3..2025Q1 and stopped,
+        # leaving 2.5% of 1.4M events labellable. Order is irrelevant to
+        # correctness, so prioritise the window we can actually measure.
+        for year, quarter in reversed(quarters_between(start, min(end, cutoff))):
             if deadline and time.monotonic() > deadline:
                 # CI runs are time-boxed. Quarters already stored are skipped on
                 # the next invocation, so stopping here loses nothing.

@@ -141,3 +141,15 @@ def test_five_years_is_about_twenty_downloads():
     qs = quarters_between(date(2021, 8, 1), date(2026, 8, 1))
 
     assert 19 <= len(qs) <= 22
+
+
+def test_quarters_between_is_oldest_first():
+    """cmd_ingest_bulk reverses this. Pinning the direction here so a future
+    change to either side cannot silently reintroduce the bug where a
+    time-boxed run spends its whole budget on deep baselines and never reaches
+    the labelling window."""
+    qs = quarters_between(date(2024, 1, 1), date(2025, 6, 1))
+
+    assert qs[0] == (2024, 1)
+    assert qs[-1] == (2025, 2)
+    assert qs == sorted(qs)
