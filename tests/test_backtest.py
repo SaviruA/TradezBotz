@@ -343,3 +343,68 @@ def test_broad_edge_is_not_flagged_as_outlier_dependent(reg):
     res = run(labels, payloads, hypothesis="broad", rationale="r", registry=reg)
 
     assert res.outlier_dependent is False
+
+
+# --- transaction costs ---------------------------------------------------------
+
+def test_uncosted_results_do_not_claim_to_survive(reg):
+    """An unmeasured cost is not a passed test. Treating 'uncosted' as 'survives'
+    is exactly the failure the field exists to prevent."""
+    p, l = dataset(100, ret=0.05)
+
+    res = run(l, p, hypothesis="gross only", rationale="r", registry=reg)
+
+    assert res.costed is False
+    assert res.survives_costs is False, "not measured is not passed"
+    assert "UNCOSTED" in res.summary()
+
+
+def test_costs_are_subtracted_per_trade(reg):
+    p, l = dataset(100, ret=0.05)
+
+    res = run(l, p, hypothesis="costed", rationale="r", registry=reg,
+              costs=lambda label: 0.01)
+
+    assert res.costed is True
+    assert res.mean_return == pytest.approx(0.05)
+    assert res.mean_return_net == pytest.approx(0.04)
+    assert res.median_cost_bps == pytest.approx(100.0)
+    assert res.survives_costs is True
+
+
+def test_an_edge_smaller_than_the_spread_is_a_loss(reg):
+    """The case this whole model exists to catch: a positive gross edge that is
+    negative once the round trip is paid."""
+    p, l = dataset(100, ret=0.01)
+
+    res = run(l, p, hypothesis="eaten", rationale="r", registry=reg,
+              costs=lambda label: 0.03)
+
+    assert res.mean_return > 0
+    assert res.mean_return_net < 0
+    assert res.survives_costs is False
+    assert "DOES NOT SURVIVE COSTS" in res.summary()
+
+
+def test_cost_ratio_reports_how_much_was_eaten(reg):
+    p, l = dataset(100, ret=0.04)
+
+    res = run(l, p, hypothesis="half", rationale="r", registry=reg,
+              costs=lambda label: 0.02)
+
+    assert res.cost_ratio == pytest.approx(0.5)
+
+
+def test_costs_can_vary_by_symbol(reg):
+    """Cost varies by an order of magnitude across this universe; charging one
+    average would flatter the illiquid names, which carry the signal."""
+    payloads = [{"k": 1}] * 2
+    labels = [label(0.05), label(0.05)]
+    object.__setattr__(labels[0], "symbol", "MEGA")
+    object.__setattr__(labels[1], "symbol", "MICRO")
+    costs = {"MEGA": 0.0005, "MICRO": 0.03}
+
+    res = run(labels, payloads, hypothesis="mixed", rationale="r", registry=reg,
+              costs=lambda lab: costs[lab.symbol])
+
+    assert res.mean_return_net == pytest.approx(0.05 - (0.0005 + 0.03) / 2)

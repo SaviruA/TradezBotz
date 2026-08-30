@@ -4,6 +4,7 @@ pandas>=2.2
 numpy>=1.26
 alpaca-py>=0.33
 tzdata>=2024.1 ; sys_platform == "win32"
+bidask>=2.1      # EDGE spread estimator, Ardia/Guidotti/Kroencke JFE 2024
 pytest>=8.0
 
 # Optional: third price source for `crosscheck --three-way`.

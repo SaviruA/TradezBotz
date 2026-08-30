@@ -108,6 +108,13 @@ class BacktestResult:
     n_symbols: int = 0
     top_symbol_share: float = 0.0
     mean_return_winsorised: float = 0.0
+    #: Mean return after round-trip transaction costs. Zero when no cost model
+    #: was supplied, in which case `costed` is False and the gross figure is the
+    #: only one that exists.
+    mean_return_net: float = 0.0
+    #: Median round-trip cost actually charged, in basis points.
+    median_cost_bps: float = 0.0
+    costed: bool = False
     coverage: dict = field(default_factory=dict)
     notes: str = ""
 
@@ -122,6 +129,29 @@ class BacktestResult:
         if self.mean_return == 0:
             return False
         return abs(self.mean_return_winsorised / self.mean_return) < 0.5
+
+    @property
+    def survives_costs(self) -> bool:
+        """Whether the edge is still positive once fills are paid for.
+
+        The single most important property here, and the one that was missing
+        while every result was computed as though fills were free. Small-cap
+        spreads run five to ten times wider than large-cap ones, and this is a
+        small-cap strategy: a gross edge smaller than the round trip is not a
+        weak edge, it is a loss.
+
+        False when no cost model was supplied -- an uncosted result has not
+        demonstrated survival, and treating "unmeasured" as "passed" is exactly
+        the failure this field exists to prevent.
+        """
+        return self.costed and self.mean_return_net > 0
+
+    @property
+    def cost_ratio(self) -> float:
+        """Share of the gross edge consumed by costs. >1 means costs exceed it."""
+        if not self.costed or self.mean_return == 0:
+            return 0.0
+        return 1.0 - (self.mean_return_net / self.mean_return)
 
     @property
     def clustered(self) -> bool:
@@ -146,6 +176,15 @@ class BacktestResult:
             f"  t-stat {self.t_stat:+.2f}  Sharpe/trade {self.sharpe_per_trade:+.3f}\n"
             f"  DSR {self.deflated_sharpe:.3f} across {self.n_trials} trials  "
             f"-> {'SIGNIFICANT' if self.significant else 'not significant'}"
+            + (
+                f"\n  net {self.mean_return_net:+.3%} after "
+                f"{self.median_cost_bps:.0f}bps costs "
+                f"({self.cost_ratio:.0%} of the edge)"
+                f"{'' if self.survives_costs else '  -- DOES NOT SURVIVE COSTS'}"
+                if self.costed else
+                "\n  UNCOSTED: gross returns only. Fills are not free, and this "
+                "is a small-cap strategy."
+            )
             + (
                 f"\n  WARNING: clustered -- {self.n_trades:,} trades over only "
                 f"{self.n_symbols} symbols, top symbol {self.top_symbol_share:.0%}. "
@@ -199,6 +238,7 @@ def run(
     horizon: int = 5,
     partition: str = "train",
     trades_per_year: float | None = None,
+    costs: "Callable[[Label], float] | None" = None,
 ) -> BacktestResult:
     """Measure one hypothesis over labelled events.
 
@@ -216,6 +256,7 @@ def run(
     coverage = {c.value: 0 for c in Coverage}
     returns: list[float] = []
     symbols: list[str] = []
+    cost_per_trade: list[float] = []
     for payload, label in pairs:
         coverage[label.coverage.value] += 1
         if horizon not in label.returns:
@@ -223,6 +264,13 @@ def run(
         if selector(payload, label):
             returns.append(label.returns[horizon])
             symbols.append(label.symbol)
+            if costs is not None:
+                # Charged per trade rather than as one average, because cost
+                # varies by an order of magnitude across this universe -- a
+                # mega-cap round trip is ~5bps and a micro-cap one ~300bps.
+                # A single average would flatter the illiquid names, which are
+                # exactly the ones carrying the signal.
+                cost_per_trade.append(costs(label))
 
     n = len(returns)
     if n < 2:
@@ -243,6 +291,14 @@ def run(
 
     mean = statistics.fmean(returns)
     mean_w = statistics.fmean(winsorise(returns))
+    costed = bool(cost_per_trade) and len(cost_per_trade) == len(returns)
+    if costed:
+        mean_net = statistics.fmean(
+            r - c for r, c in zip(returns, cost_per_trade)
+        )
+        median_cost_bps = statistics.median(cost_per_trade) * 10_000
+    else:
+        mean_net, median_cost_bps = 0.0, 0.0
     sd = statistics.stdev(returns)
     skew, kurt = _moments(returns)
     sharpe_trade = mean / sd if sd > 0 else 0.0
@@ -276,6 +332,7 @@ def run(
         significant=bool(verdict["significant"]),
         n_symbols=n_symbols, top_symbol_share=top_share,
         mean_return_winsorised=mean_w,
+        mean_return_net=mean_net, median_cost_bps=median_cost_bps, costed=costed,
         coverage=coverage,
     )
 

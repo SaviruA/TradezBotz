@@ -20,11 +20,14 @@ from tradezbotz.research.indicators import (
     above_ma,
     bollinger,
     bollinger_squeeze,
+    distance_from_high,
     donchian,
     donchian_breakout,
+    gain_over,
     ema,
     macd,
     momentum,
+    near_high,
     percentile_rank,
     rsi,
     rsi_oversold,
@@ -438,3 +441,66 @@ def test_sweeps_are_safe_on_short_series():
     assert swept_low(bars, 4) is False
     assert swept_high(bars, 4) is False
     assert relative_volume(bars, 4) is None
+
+
+# --- distance from the 52-week high --------------------------------------------
+
+def test_distance_from_high_is_zero_at_the_high():
+    bars = bars_from(rising(300))
+
+    assert distance_from_high(bars, 299) == pytest.approx(0.0, abs=0.01)
+
+
+def test_distance_from_high_grows_in_a_downtrend():
+    falling = bars_from([400 - i for i in range(300)])
+
+    assert distance_from_high(falling, 299) > 0.5
+
+
+def test_distance_from_high_is_causal():
+    """A later high must not change an earlier reading."""
+    closes = rising(400)
+    short = distance_from_high(bars_from(closes[:300]), 299)
+    long = distance_from_high(bars_from(closes), 299)
+
+    assert short == pytest.approx(long)
+
+
+def test_distance_from_high_uses_only_the_lookback():
+    """A crash outside the 52-week window must age out of the calculation."""
+    closes = [1000.0] + [100.0 + i * 0.01 for i in range(400)]
+    bars = bars_from(closes)
+
+    assert distance_from_high(bars, 400, lookback=252) < 0.1, "the 1000 has aged out"
+
+
+def test_near_high_selector():
+    """The paper's dominant feature: 36% of model importance on our exact
+    population, and pointing at strength rather than weakness."""
+    assert near_high(bars_from(rising(300)), 299) is True
+    assert near_high(bars_from([400 - i for i in range(300)]), 299) is False
+
+
+def test_gain_over_detects_a_run():
+    flat = bars_from([100.0] * 100)
+    surge = bars_from([100.0] * 79 + [100.0 + i * 2 for i in range(21)])
+
+    assert gain_over(flat, 99) is False
+    assert gain_over(surge, 99) is True
+
+
+def test_high_and_gain_are_different_claims():
+    """A stock can be near its high having gone nowhere, or up 10% and still far
+    below it. Testing them separately is the point."""
+    drifting = bars_from([100.0 + i * 0.001 for i in range(300)])
+
+    assert near_high(drifting, 299) is True
+    assert gain_over(drifting, 299) is False
+
+
+def test_high_features_are_safe_on_short_series():
+    bars = bars_from(rising(5))
+
+    assert near_high(bars, 4) in (True, False)
+    assert gain_over(bars, 4) is False
+    assert distance_from_high(bars, 99) is None

@@ -446,3 +446,73 @@ def swept_high(bars: Sequence[Bar], i: int, period: int = SWEEP_PERIOD,
         return False
     rv = relative_volume(bars, i, period)
     return rv is not None and rv >= volume_multiple
+
+
+# --- distance from the 52-week high -------------------------------------------
+#
+# The strongest single documented predictor for our exact population. Ardia-style
+# feature-importance work on microcap insider purchases (arXiv 2602.06198:
+# 17,237 purchases, 1,343 companies, 2018-2024, $30M-$500M market cap) found
+# distance from the 52-week high carried 36% of total model importance -- more
+# than any other feature including insider identity and transaction size.
+#
+# The direction is the surprising part and the reason this is worth its own
+# function rather than being folded into `momentum`. Purchases disclosed AFTER
+# price gains exceeding 10% carried 6.3% mean cumulative abnormal returns: the
+# signal is trend confirmation, not mean reversion. The authors read this as
+# conviction filtering -- an insider buying into strength in an illiquid name is
+# making a different statement than one buying a decline.
+#
+# The same study reports only a 36.7% probability of outperformance alongside
+# that 6.3% mean, so the payoff is heavily right-skewed: most trades lose and a
+# few win large. `BacktestResult.outlier_dependent` exists for exactly this, and
+# any result built on this feature should be read beside its winsorised twin.
+
+#: Sessions in a trading year, the conventional 52-week window.
+YEAR_SESSIONS = 252
+
+
+def distance_from_high(bars: Sequence[Bar], i: int,
+                       lookback: int = YEAR_SESSIONS) -> float | None:
+    """How far below its trailing high the close sits, as a fraction.
+
+    0.0 means at the high; 0.25 means 25% below it. Causal: the window ends at
+    `i` and includes it, so the value is knowable at the close of bar i.
+    """
+    if i < 0 or i >= len(bars):
+        return None
+    lo = max(0, i - lookback + 1)
+    window = bars[lo : i + 1]
+    if len(window) < 2:
+        return None
+    high = max(b.high for b in window)
+    if high <= 0:
+        return None
+    return (high - bars[i].close) / high
+
+
+def near_high(bars: Sequence[Bar], i: int, threshold: float = 0.10,
+              lookback: int = YEAR_SESSIONS) -> bool:
+    """Whether price is within `threshold` of its 52-week high.
+
+    The selector form of the paper's dominant feature, for use inside `all_of`
+    beside an insider-buy filter.
+    """
+    d = distance_from_high(bars, i, lookback)
+    return d is not None and d <= threshold
+
+
+def gain_over(bars: Sequence[Bar], i: int, lookback: int = 21,
+              threshold: float = 0.10) -> bool:
+    """Whether price rose more than `threshold` over the trailing `lookback`.
+
+    The paper's strongest cut was purchases disclosed after gains exceeding 10%.
+    Kept separate from `near_high` because they are different claims: a stock can
+    be up 10% and still far below its high, or near its high having gone nowhere.
+    """
+    if i < lookback or i >= len(bars):
+        return False
+    past = bars[i - lookback].close
+    if past <= 0:
+        return False
+    return (bars[i].close / past - 1.0) >= threshold
