@@ -22,7 +22,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -42,6 +42,10 @@ STALE_BAR_DAYS = 5
 #: requested. Recorded here so callers can reason about coverage gaps rather
 #: than mistaking the cap for a delisting.
 FREE_TIER_HISTORY_DAYS = 730
+
+#: Alpaca refuses consolidated-feed data newer than this. A request whose end
+#: is today reaches into it and is refused wholesale, so windows are clamped.
+SIP_DELAY_MINUTES = 15
 
 
 class PriceError(RuntimeError):
@@ -379,6 +383,23 @@ class AlpacaPriceSource:
         self.session = session or requests.Session()
         self.feed = feed
 
+    def _end_param(self, end: date) -> str:
+        """Clamp the window out of the SIP embargo.
+
+        The consolidated feed refuses data inside the last 15 minutes, and a
+        request whose end is *today* reaches into that window -- returning 403
+        for the whole request, not just the embargoed part. Since callers
+        routinely pass `date.today()`, without this every such call fails.
+
+        Only applies to `sip`. IEX has no embargo, which is why this was not
+        needed while IEX was the default.
+        """
+        requested = datetime.combine(end, dtime(0, 0), tzinfo=timezone.utc)
+        if self.feed != "sip":
+            return requested.isoformat().replace("+00:00", "Z")
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=SIP_DELAY_MINUTES + 1)
+        return min(requested, cutoff).isoformat().replace("+00:00", "Z")
+
     def daily_bars(self, symbol: str, start: date, end: date) -> Series:
         symbol = symbol.upper()
         if self.cache and self.cache.covered(symbol, start, end):
@@ -386,12 +407,13 @@ class AlpacaPriceSource:
 
         bars: list[Bar] = []
         page: str | None = None
+        end_param = self._end_param(end)
         while True:
             self.limiter.acquire()
             params = {
                 "timeframe": "1Day",
                 "start": start.isoformat(),
-                "end": end.isoformat(),
+                "end": end_param,
                 # Split- and dividend-adjusted, matching what we ask Massive for.
                 # Mismatched adjustment would show up as fake disagreement.
                 "adjustment": "all",
@@ -436,3 +458,86 @@ class AlpacaPriceSource:
         if self.cache:
             self.cache.put(series)
         return series
+
+
+#: Yahoo, reached through OpenBB. Requested per call rather than held open, so a
+#: missing optional dependency fails at use rather than at import.
+OPENBB_PROVIDER = "yfinance"
+
+
+class OpenBBPriceSource:
+    """A third price opinion, via OpenBB's provider layer.
+
+    Exists to settle a question two sources cannot. Massive and Alpaca disagree
+    materially on corporate-action adjustment, and disagreement alone never says
+    which one is wrong -- with two sources the best available answer is "one of
+    these is broken." A third independent vendor turns that into an answer.
+
+    It is not a candidate for system of record. Yahoo is a derived, unaudited,
+    terms-of-service-grey feed and we would not build returns on it. Its value
+    here is precisely that it is *independent* of the other two: it shares no
+    infrastructure with either, so agreement between Yahoo and one vendor is
+    real evidence about the other.
+
+    OpenBB rather than raw yfinance because the same interface reaches nine
+    providers for this endpoint. When one more reference is wanted, it is a
+    provider string rather than another adapter.
+
+    Optional dependency: `pip install openbb-yfinance`.
+    """
+
+    def __init__(self, provider: str = OPENBB_PROVIDER,
+                 cache: "PriceCache | None" = None) -> None:
+        self.provider = provider
+        self.cache = cache
+
+    def _fetcher(self):
+        if self.provider != "yfinance":
+            raise PriceError(
+                f"provider {self.provider!r} needs its own OpenBB package and a "
+                "fetcher mapping; only yfinance is wired up."
+            )
+        try:
+            from openbb_yfinance.models.equity_historical import (
+                YFinanceEquityHistoricalFetcher,
+            )
+        except ImportError as exc:  # pragma: no cover - depends on environment
+            raise PriceError(
+                "OpenBB provider missing. Install it with:\n"
+                "    pip install openbb-yfinance\n"
+                "It is an optional extra: the pipeline runs without it, and only "
+                "three-way crosscheck needs it."
+            ) from exc
+        return YFinanceEquityHistoricalFetcher
+
+    def daily_bars(self, symbol: str, start: date, end: date) -> Series:
+        import asyncio
+
+        symbol = symbol.upper()
+        fetcher = self._fetcher()
+        rows = asyncio.run(
+            fetcher.fetch_data(
+                {
+                    "symbol": symbol,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "interval": "1d",
+                },
+                {},
+            )
+        )
+        bars = [
+            Bar(
+                day=r.date if isinstance(r.date, date) else r.date.date(),
+                open=float(r.open), high=float(r.high), low=float(r.low),
+                close=float(r.close), volume=float(r.volume or 0.0),
+            )
+            for r in rows
+        ]
+        bars.sort(key=lambda b: b.day)
+        # Yahoo reports no delisting flag; leaving this unknown rather than
+        # guessing keeps Massive the sole authority on whether a ticker lives.
+        return Series(
+            symbol=symbol, bars=tuple(bars),
+            requested_start=start, requested_end=end, is_active=None,
+        )

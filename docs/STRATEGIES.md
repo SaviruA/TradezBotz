@@ -42,6 +42,37 @@ control group matters more than the candidate.
 | VWAP reversion (session) | planned | — | needs intraday |
 | Opening range breakout | planned | — | needs intraday |
 
+## From awesome-systematic-trading
+
+Mined 2026-08-30. The list is a curated index, not code, so these are candidate
+hypotheses rather than dependencies. Only entries that work on data we hold are
+listed; crypto-only and broker-API entries were skipped.
+
+| hypothesis | status | why it earns a row |
+| --- | --- | --- |
+| Hurst exponent regime filter | planned | classifies a series as mean-reverting / random walk / trending. Most useful as a *conditioner*: Bollinger reversion should work in mean-reverting regimes and fail in trending ones, and that split is testable |
+| Yang-Zhang volatility | planned | uses the full OHLC bar rather than closes, so it is far more efficient than close-to-close on the same data. Drop-in better input wherever we currently use stdev |
+| Garman-Klass / Parkinson volatility | planned | same family; worth testing against Yang-Zhang since each handles gaps differently |
+| Keltner channel | planned | the textbook squeeze is Bollinger bands *inside* Keltner channels. We implemented the squeeze as a bandwidth percentile instead, so this is the conventional definition as a control |
+| Microprice (Stoikov) | planned | order-book fair-value estimator. Newly reachable: the intraday pipeline now pulls NBBO quotes |
+| Pairs / cointegration | planned | the one genuinely different structure on the list -- relative rather than directional, so it pairs with everything else |
+| Heikin-Ashi | planned | smoothed candles; a trend filter with a different lag profile from an MA |
+| Dual Thrust | planned | open-range breakout with a volatility-scaled band |
+| Parabolic SAR | planned | trailing stop rule; more interesting as an *exit* than an entry, and we have no exit rules yet |
+| Awesome Oscillator | planned | momentum via 5/34 median-price MAs; overlaps MACD, so worth testing as a substitute rather than an addition |
+
+**Two tools rather than strategies**, both worth stealing:
+
+- **honest-signals** scores chart patterns against a pattern-free baseline for
+  the same market and timeframe, reporting lift with *cluster-robust confidence
+  intervals*. That is exactly the unresolved problem in our own results: every
+  backtest so far flags `CLUSTERED` because overlapping events on one symbol are
+  not independent draws. Cluster-robust standard errors are the standard answer
+  and we should adopt them.
+- **alphalens** does factor IC and quantile-return analysis. Our engine measures
+  one hypothesis at a time; cross-sectional ranking is a different and
+  complementary question.
+
 ## Event signals
 
 | hypothesis | status | where | notes |

@@ -165,6 +165,19 @@ us and the raw data.
 
 ### The two price sources disagree on corporate actions
 
+> **Substantially corrected, 2026-08-30.** A third source (Yahoo, via OpenBB)
+> showed that most of this disagreement is **not an error**: Alpaca is
+> total-return adjusted while Massive and Yahoo are price-only, so Alpaca sits
+> below both by the accumulated dividend. Of 24 disputed symbols, 15 were this
+> and only 5 were genuine faults. The XELB split case below is real and stands;
+> the 54.2% figure and the conclusion drawn from it do not. Full working in
+> [docs/PRICE-BASIS.md](docs/PRICE-BASIS.md).
+>
+> The general lesson is worth more than the specific finding: **a two-source
+> crosscheck cannot distinguish a fault from a definition.** Disagreement was
+> read as evidence of error when it was evidence of a different question being
+> answered. That is why a third source exists now.
+
 `tradezbotz crosscheck` over 203 cached symbols: **only 54.2% agree**, 45 of 203
 disagree materially. The cause is not IEX illiquidity, which is what Alpaca was
 added to guard against.
@@ -199,7 +212,7 @@ Alpaca's forums report the adjustment parameter returning identical results for
 3. **Trade only where they agree.** Two independently maintained sources
    converging is real evidence; divergence flags a name where at least one is
    broken and we cannot tell which. That currently keeps 110 of 203 symbols.
-4. `crosscheck` is a gate, not a validation of one vendor — its job is finding
+4. `crosscheck` is a gate, not a validation of one vendor ï¿½ its job is finding
    names where nobody can be trusted.
 
 **Measured, not assumed.** On 2026-08-29, 8 of the top 100 r/wallstreetbets

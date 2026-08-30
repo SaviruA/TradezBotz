@@ -337,8 +337,10 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
     This decides whether Alpaca's deeper history (7+ years, against Massive's 2)
     is usable for the slow indicators, rather than assuming either way.
     """
-    from .research.crosscheck import compare, summarise
-    from .research.prices import AlpacaPriceSource, PriceCache
+    from .research.crosscheck import (
+        adjudicate, compare, summarise, summarise_adjudications,
+    )
+    from .research.prices import AlpacaPriceSource, OpenBBPriceSource, PriceCache
 
     cache = PriceCache(DEFAULT_STATE / BARS_DB)
     symbols = cache.symbols()[: args.limit] if args.limit else cache.symbols()
@@ -347,10 +349,13 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
         return 1
 
     alpaca = AlpacaPriceSource(per_minute=args.per_minute)
+    # A third, independent opinion. Two sources can only ever say "one of you is
+    # wrong"; three can say which one. Optional -- it needs an extra package.
+    referee = OpenBBPriceSource() if args.three_way else None
     end = date.today()
     start = end - timedelta(days=PRICE_WINDOW_DAYS)
 
-    results, worst = [], []
+    results, worst, verdicts = [], [], []
     for i, symbol in enumerate(symbols, 1):
         primary = cache.get(symbol, start, end)
         if not primary.bars:
@@ -364,6 +369,14 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
         results.append(d)
         if d.median_rel_diff and d.median_rel_diff > 0.02:
             worst.append(d)
+        # Only pay for the referee where the first two actually disagree.
+        # Symbols they already agree on need no tiebreak.
+        if referee is not None and not d.trustworthy:
+            try:
+                third = referee.daily_bars(symbol, start, end)
+                verdicts.append(adjudicate(primary, secondary, third))
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {symbol:8s} referee failed: {type(exc).__name__}", flush=True)
         if i % 25 == 0:
             print(f"  ...{i}/{len(symbols)}", flush=True)
 
@@ -378,6 +391,23 @@ def cmd_crosscheck(args: argparse.Namespace) -> int:
                   f"max {d.max_rel_diff:6.2%}  over {d.overlapping_days} days")
         print("\n  Treat these as low-confidence: exclude them in a sensitivity")
         print("  check rather than silently trusting either source.")
+
+    if verdicts:
+        print("\n  Third-source adjudication of the disputed symbols:")
+        for k, v in summarise_adjudications(verdicts).items():
+            print(f"    {k:22s} {v}")
+        settled = [v for v in verdicts
+                   if v.trustworthy_source in ("primary", "secondary")]
+        if settled:
+            print("\n    symbol    believe   pairwise medians")
+            for v in sorted(settled, key=lambda x: x.symbol)[:20]:
+                name = {"primary": "massive", "secondary": "alpaca"}[v.trustworthy_source]
+                print(f"    {v.symbol:8s}  {name:8s}  "
+                      f"M-A {v.primary_secondary:6.2%}  "
+                      f"M-Y {v.primary_referee:6.2%}  "
+                      f"A-Y {v.secondary_referee:6.2%}")
+            print("\n    Per symbol, not globally. Neither vendor is uniformly")
+            print("    correct, so there is no single source to switch to.")
     cache.close()
     return 0
 
@@ -576,6 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
     xc.add_argument("--limit", type=int, help="stop after N symbols")
     xc.add_argument("--per-minute", type=int, default=180,
                     help="Alpaca allows 200/min on the free plan")
+    xc.add_argument("--three-way", action="store_true",
+                    help="bring in a third source (OpenBB/Yahoo) to adjudicate "
+                         "symbols where Massive and Alpaca disagree; needs "
+                         "`pip install openbb-yfinance`")
     xc.set_defaults(func=cmd_crosscheck)
 
     itd = sub.add_parser("backfill-intraday",

@@ -151,3 +151,221 @@ def summarise(results: list[Disagreement]) -> dict[str, float | int]:
         "range_trustworthy_rate":
             sum(1 for r in results if r.range_trustworthy) / len(results),
     }
+
+
+# --- three-way adjudication ---------------------------------------------------
+#
+# Two sources can only ever say "one of you is wrong." Measured on 203 symbols,
+# 45 disagreed materially and we spent weeks unable to say which vendor to
+# believe -- so Alpaca's deeper history stayed unusable on principle rather than
+# on evidence. A third independent source converts that standoff into a verdict.
+#
+# It is a referee, not a system of record. Yahoo is derived and unaudited; the
+# only property being used is independence from the other two.
+
+class Verdict(str, Enum):
+    ALL_AGREE = "all_agree"
+    #: Two agree and the third is the outlier -- the useful case.
+    PRIMARY_OUTLIER = "primary_outlier"
+    SECONDARY_OUTLIER = "secondary_outlier"
+    REFEREE_OUTLIER = "referee_outlier"
+    #: Not an error at all: the sources are quoting different things. One is
+    #: total-return (dividend) adjusted and the others are price-only, so the
+    #: series diverge by the accumulated distribution and reconverge at the
+    #: present. Both are correct; they answer different questions.
+    ADJUSTMENT_BASIS = "adjustment_basis"
+    #: All three disagree with each other. No majority, so no verdict.
+    NO_MAJORITY = "no_majority"
+    INSUFFICIENT_OVERLAP = "insufficient_overlap"
+
+
+#: A dividend-adjusted series is *below* a price-only one everywhere in the past
+#: and converges to it at the present. Requiring both properties separates this
+#: from a genuine error: a bad split factor is a roughly constant ratio that does
+#: not converge, and can point either way.
+CONVERGENCE_RATIO = 0.25
+
+
+@dataclass(frozen=True)
+class Adjudication:
+    symbol: str
+    primary_secondary: float | None
+    primary_referee: float | None
+    secondary_referee: float | None
+    verdict: Verdict
+    overlapping_days: int
+
+    @property
+    def trustworthy_source(self) -> str | None:
+        """Which of the two working sources to believe for this symbol.
+
+        None when there is no verdict. Deliberately per-symbol: measured against
+        Yahoo, Massive was right on XELB (7.03 against Alpaca's 21.11) and wrong
+        on BDX (240.97 against Alpaca's 181.20 and Yahoo's 189.44). Neither
+        vendor is uniformly correct, so a global "trust X" rule would be wrong
+        roughly half the time.
+        """
+        if self.verdict is Verdict.ALL_AGREE:
+            return "both"
+        if self.verdict is Verdict.PRIMARY_OUTLIER:
+            return "secondary"
+        if self.verdict is Verdict.SECONDARY_OUTLIER:
+            return "primary"
+        if self.verdict is Verdict.ADJUSTMENT_BASIS:
+            # Both are right. Which to use is a modelling choice, not a data
+            # quality one, so this deliberately does not name a winner.
+            return "both"
+        return None
+
+
+def _median_diff(a: Series, b: Series) -> tuple[float | None, int]:
+    other = {bar.day: bar for bar in b.bars}
+    diffs = [
+        abs(bar.close - other[bar.day].close) / bar.close
+        for bar in a.bars
+        if bar.day in other and bar.close > 0
+    ]
+    if len(diffs) < MIN_OVERLAP_DAYS:
+        return None, len(diffs)
+    return statistics.median(diffs), len(diffs)
+
+
+def _signed_diffs(a: Series, b: Series) -> list[tuple[object, float]]:
+    """Per-day (day, (b - a)/a), oldest first. Sign is the whole point here."""
+    other = {bar.day: bar for bar in b.bars}
+    return [
+        (bar.day, (other[bar.day].close - bar.close) / bar.close)
+        for bar in a.bars
+        if bar.day in other and bar.close > 0
+    ]
+
+
+def _looks_like_dividend_adjustment(price_only: Series, candidate: Series) -> bool:
+    """Whether `candidate` is the same series on a total-return basis.
+
+    Two signatures must both hold, and requiring both is what separates this
+    from a genuine error:
+
+    1. **One-sided.** A dividend-adjusted history is *below* the price-only one
+       on essentially every past day, because past prices are marked down by the
+       distributions paid since. A bad split factor can point either way.
+    2. **Convergent.** The gap is the sum of dividends *since that day*, so it
+       shrinks to nothing at the present. A wrong split factor is a roughly
+       constant ratio that never converges -- which is exactly the XELB case
+       (a clean 3.004 throughout), and that one is a real error.
+    """
+    signed = _signed_diffs(price_only, candidate)
+    if len(signed) < MIN_OVERLAP_DAYS * 4:
+        return False
+    values = [v for _, v in signed]
+    below = sum(1 for v in values if v < 0) / len(values)
+    if below < 0.9:
+        return False
+
+    gaps = [abs(v) for v in values]
+    if statistics.median(gaps) <= AGREE_THRESHOLD:
+        return False
+
+    # Rank correlation of the gap against time. Dividends accumulate backwards
+    # from today, so the gap declines monotonically and this sits near -1; a
+    # wrong split factor is a constant ratio and sits near 0.
+    #
+    # Rank rather than a two-window ratio because the gap is a fraction of
+    # *price*, and on a name whose price itself collapsed the raw ratio is
+    # dominated by the price path. ARI pays ~98% of its price in distributions
+    # over the window and also fell hard: the ratio test called it a vendor
+    # fault, the rank test correctly reads the monotone decline.
+    return _rank_correlation(list(range(len(gaps))), gaps) <= -0.7
+
+
+def _rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman correlation. Returns 0.0 when either side has no spread."""
+    def ranks(vs: list[float]) -> list[float]:
+        order = sorted(range(len(vs)), key=lambda i: vs[i])
+        out = [0.0] * len(vs)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and vs[order[j + 1]] == vs[order[i]]:
+                j += 1
+            shared = (i + j) / 2.0
+            for k in range(i, j + 1):
+                out[order[k]] = shared
+            i = j + 1
+        return out
+
+    rx, ry = ranks(xs), ranks(ys)
+    n = len(rx)
+    if n < 3:
+        return 0.0
+    mx, my = statistics.fmean(rx), statistics.fmean(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = sum((a - mx) ** 2 for a in rx)
+    dy = sum((b - my) ** 2 for b in ry)
+    if dx <= 0 or dy <= 0:
+        return 0.0
+    return num / (dx * dy) ** 0.5
+
+
+def adjudicate(primary: Series, secondary: Series, referee: Series) -> Adjudication:
+    """Decide which of two disagreeing sources the third one backs.
+
+    The rule is majority, not proximity: two sources agreeing within
+    AGREE_THRESHOLD outvote a third that differs from both. Proximity would let
+    a source that is merely *less* wrong win, which is not the same claim.
+    """
+    ps, n_ps = _median_diff(primary, secondary)
+    pr, n_pr = _median_diff(primary, referee)
+    sr, n_sr = _median_diff(secondary, referee)
+    overlap = min(n_ps, n_pr, n_sr)
+
+    if ps is None or pr is None or sr is None:
+        return Adjudication(primary.symbol, ps, pr, sr,
+                            Verdict.INSUFFICIENT_OVERLAP, overlap)
+
+    close = AGREE_THRESHOLD
+    if ps <= close and pr <= close and sr <= close:
+        verdict = Verdict.ALL_AGREE
+    elif (pr <= close < ps
+          and _looks_like_dividend_adjustment(primary, secondary)):
+        # Primary and referee agree, and the secondary's divergence has the
+        # total-return signature. Checked BEFORE calling it an outlier: measured
+        # on 20 disputed symbols this was every single one of them, and calling
+        # a legitimately dividend-adjusted series "wrong" would have retired a
+        # perfectly good source over a definitional difference.
+        verdict = Verdict.ADJUSTMENT_BASIS
+    elif sr <= close < ps and pr > close:
+        # secondary and referee agree; primary is the odd one out
+        verdict = Verdict.PRIMARY_OUTLIER
+    elif pr <= close < ps and sr > close:
+        verdict = Verdict.SECONDARY_OUTLIER
+    elif ps <= close < pr and sr > close:
+        verdict = Verdict.REFEREE_OUTLIER
+    else:
+        verdict = Verdict.NO_MAJORITY
+    return Adjudication(primary.symbol, ps, pr, sr, verdict, overlap)
+
+
+def summarise_adjudications(results: list[Adjudication]) -> dict[str, float | int]:
+    """Aggregate verdicts, and report how often each vendor was the outlier.
+
+    The headline number is `resolved`: how many previously-deadlocked symbols the
+    referee actually settled. Everything else is diagnostics.
+    """
+    if not results:
+        return {"total": 0}
+    counts = {v: sum(1 for r in results if r.verdict is v) for v in Verdict}
+    resolved = counts[Verdict.PRIMARY_OUTLIER] + counts[Verdict.SECONDARY_OUTLIER]
+    benign = counts[Verdict.ALL_AGREE] + counts[Verdict.ADJUSTMENT_BASIS]
+    return {
+        "total": len(results),
+        "all_agree": counts[Verdict.ALL_AGREE],
+        "adjustment_basis": counts[Verdict.ADJUSTMENT_BASIS],
+        "primary_outlier": counts[Verdict.PRIMARY_OUTLIER],
+        "secondary_outlier": counts[Verdict.SECONDARY_OUTLIER],
+        "referee_outlier": counts[Verdict.REFEREE_OUTLIER],
+        "no_majority": counts[Verdict.NO_MAJORITY],
+        "insufficient_overlap": counts[Verdict.INSUFFICIENT_OVERLAP],
+        "resolved": resolved,
+        "usable": benign + resolved,
+    }
