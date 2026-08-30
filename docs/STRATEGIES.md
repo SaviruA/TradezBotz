@@ -80,9 +80,23 @@ listed; crypto-only and broker-API entries were skipped.
 | Insider buy (Form 4, code P) | built | `backtest` selectors | baseline event |
 | Opportunistic vs routine insider | built | `classify.RoutineClassifier` | Cohen/Malloy/Pomorski split |
 | Reddit sentiment rank | built | `apewisdom` | forward-only; no historical backfill yet |
+| **8-K material event (by item)** | built | `filings.is_results_8k` etc | item codes carry the signal; raw filing *frequency* is a NEGATIVE signal |
+| **424B offering / dilution** | built | `filings.is_immediate_dilution` | negative signal; offerings drop small caps 20-30% |
+| **Distance from 52-week high** | built | `indicators.near_high` | 36% of model importance on microcap insider buys; strength, not weakness |
 | 13D/13G activist stake | planned | — | 5-business-day disclosure, structured since Dec 2024 |
 | 13F quarterly holdings | planned | — | 45-day lag; bulk archives exist |
 | Congressional PTR | planned | — | Capitol Trades-style trailing-return ranking |
+
+## Transaction costs gate every result now
+
+`BacktestResult.survives_costs` is the gate, and it is False when no cost model
+was supplied -- an unmeasured cost is not a passed test.
+
+Measured across 232 cached symbols with the EDGE estimator: median round trip
+**93bps**, p90 **251bps**. Sub-dollar names run past 1,000bps and are almost
+certainly untradeable whatever the signal says. A 5-day strategy must clear
+~0.93% per trade at the median name just to break even, against a published
+microcap insider CAR of ~6.3%.
 
 ## Required pairings
 
@@ -99,6 +113,12 @@ only trial budget.
 - liquidity sweep × relative volume (already coupled inside the function)
 - liquidity sweep × Donchian breakout — these partition the same bars, so
   running both prevents reading a breakout result that is really a sweep result
+- **insider buy x near 52-week high** -- the paper's strongest cut, and the one
+  that inverts the naive "buy the dip" reading
+- **insider buy x NO recent 424B** -- an insider buying into a company about to
+  run an ATM is a different trade from one that is not
+- **insider buy x 8-K item 1.01** -- insiders are documented to buy ahead of new
+  customer and supplier agreements, which is what 1.01 discloses
 - Bollinger squeeze × Donchian breakout (compression then expansion)
 
 ---
