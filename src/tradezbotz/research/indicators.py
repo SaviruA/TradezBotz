@@ -307,3 +307,142 @@ def donchian_breakout(bars: Sequence[Bar], i: int) -> bool:
 def above_ma(bars: Sequence[Bar], i: int, period: int = MA_SLOW) -> bool:
     m = sma(_closes(bars), period)[i]
     return m is not None and bars[i].close > m
+
+
+# --- volume, anchored VWAP and liquidity sweeps -------------------------------
+#
+# These three came in together because they share a dependency: they are all
+# about *where volume traded*, not just where price closed. On daily bars they
+# are approximations of intraday concepts, and the docstrings say exactly how
+# much is lost, because the gap is where a backtest quietly stops describing the
+# thing it claims to describe.
+
+#: A sweep is only interesting on conviction volume. Below this multiple of
+#: recent typical volume, a poke through a prior extreme is noise.
+SWEEP_VOLUME_MULTIPLE = 1.5
+
+#: Lookback defining "the liquidity pool" -- the prior extreme that resting
+#: stops sit beyond. 20 sessions matches the Donchian period deliberately: a
+#: sweep is the *failed* version of the breakout we already test, and using the
+#: same window makes the two directly comparable.
+SWEEP_PERIOD = 20
+
+
+def relative_volume(bars: Sequence[Bar], i: int, period: int = 20) -> float | None:
+    """Volume on bar i as a multiple of its own trailing median.
+
+    Median rather than mean: a single earnings-day spike in the window would
+    drag a mean upward and mask the next genuine surge.
+    """
+    if i < period or i >= len(bars):
+        return None
+    window = [b.volume for b in bars[i - period : i] if b.volume > 0]
+    if len(window) < period // 2:
+        return None
+    typical = statistics.median(window)
+    return bars[i].volume / typical if typical > 0 else None
+
+
+def anchored_vwap(bars: Sequence[Bar], anchor: int) -> list[float | None]:
+    """Volume-weighted average price accumulated forward from a chosen bar.
+
+    Anchored VWAP is the one volume tool with a defensible reason to exist here.
+    Ordinary VWAP anchored to an arbitrary session start answers nothing; anchored
+    to an *event* it answers something specific -- "is everyone who traded since
+    the insider filed currently up or down?" -- and we have real anchors already
+    in the event store: Form 4 dissemination, 13D filing, an earnings date.
+
+    Causality: the value at index i uses bars anchor..i only. Nothing after i
+    enters, so this can be evaluated live at bar i.
+
+    Precision: uses the source's own session VWAP when present, else the
+    (H+L+C)/3 typical price. The approximation is the standard daily-bar one and
+    is what every charting package does with daily data. It is a genuine
+    approximation -- a day that opened at the high and closed at the low is not
+    well described by its typical price -- and it disappears if we ever anchor
+    over intraday bars instead.
+    """
+    out: list[float | None] = [None] * len(bars)
+    if anchor < 0 or anchor >= len(bars):
+        return out
+    pv = vol = 0.0
+    for i in range(anchor, len(bars)):
+        b = bars[i]
+        price = b.vwap if b.vwap is not None else (b.high + b.low + b.close) / 3.0
+        pv += price * b.volume
+        vol += b.volume
+        out[i] = pv / vol if vol > 0 else price
+    return out
+
+
+def anchored_vwap_from_day(bars: Sequence[Bar], anchor_day) -> list[float | None]:
+    """Anchor by calendar date, taking the first session on or after it.
+
+    Events arrive as dates, not bar indices, and an event day is frequently not
+    a session -- a Friday-evening filing anchors to Monday.
+    """
+    for i, b in enumerate(bars):
+        if b.day >= anchor_day:
+            return anchored_vwap(bars, i)
+    return [None] * len(bars)
+
+
+def above_anchored_vwap(bars: Sequence[Bar], i: int, anchor: int) -> bool:
+    """Whether price at i is above the VWAP accumulated since the anchor.
+
+    The usual reading: buyers since the anchoring event are collectively in
+    profit, so the level tends to act as support rather than supply.
+    """
+    v = anchored_vwap(bars, anchor)
+    return i < len(v) and v[i] is not None and bars[i].close > v[i]
+
+
+def swept_low(bars: Sequence[Bar], i: int, period: int = SWEEP_PERIOD,
+              volume_multiple: float = SWEEP_VOLUME_MULTIPLE) -> bool:
+    """Bullish liquidity sweep: took out the prior low, then closed back inside.
+
+    The structure being tested is a stop run. Price trades below an obvious prior
+    low where resting sell-stops sit, those stops fill, and the bar closes back
+    above the level -- the breakdown failed, and the sellers who were stopped out
+    are now the wrong side of the market.
+
+    This is precisely the *inverse* of `donchian_breakout`: same window, same
+    level, opposite conclusion about what happens when price pierces it. Testing
+    both against the same data is the point, and if the sweep works while the
+    breakout does not, that is a real finding rather than two unrelated results.
+
+    **What the daily bar cannot tell us.** On a daily bar we see that the low
+    went below the level and the close came back, but not the order of events
+    within the session, nor whether the reclaim was immediate or took hours. The
+    intraday version of this pattern is a materially stricter condition, so a
+    daily-bar result here is an upper bound on the population, not a measurement
+    of the pattern traders actually describe. Treat a positive result as a reason
+    to build the intraday test, not as confirmation.
+    """
+    if i < period or i >= len(bars):
+        return False
+    prior_low = min(b.low for b in bars[i - period : i])
+    bar = bars[i]
+    if not (bar.low < prior_low <= bar.close):
+        return False
+    rv = relative_volume(bars, i, period)
+    return rv is not None and rv >= volume_multiple
+
+
+def swept_high(bars: Sequence[Bar], i: int, period: int = SWEEP_PERIOD,
+               volume_multiple: float = SWEEP_VOLUME_MULTIPLE) -> bool:
+    """Bearish liquidity sweep: took out the prior high, then closed back below.
+
+    The failed-breakout / bull-trap structure, and the direct control for
+    `donchian_breakout` -- a bar that pierces the prior high either holds it (a
+    breakout) or does not (a sweep). Measuring both partitions the same events
+    and prevents reading a breakout result that is really a sweep result.
+    """
+    if i < period or i >= len(bars):
+        return False
+    prior_high = max(b.high for b in bars[i - period : i])
+    bar = bars[i]
+    if not (bar.high > prior_high >= bar.close):
+        return False
+    rv = relative_volume(bars, i, period)
+    return rv is not None and rv >= volume_multiple

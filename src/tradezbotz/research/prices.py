@@ -56,6 +56,11 @@ class Bar:
     low: float
     close: float
     volume: float
+    #: Volume-weighted average price for the session, when the source reports
+    #: one. Alpaca returns it per bar; Massive does not always. Anchored VWAP is
+    #: exact when this is present and falls back to the (H+L+C)/3 typical-price
+    #: approximation when it is None.
+    vwap: float | None = None
 
 
 @dataclass(frozen=True)
@@ -360,7 +365,7 @@ class AlpacaPriceSource:
         cache: PriceCache | None = None,
         per_minute: int = ALPACA_REQUESTS_PER_MINUTE,
         session: requests.Session | None = None,
-        feed: str = "iex",
+        feed: str = "sip",
     ) -> None:
         self.api_key = api_key or os.environ.get("ALPACA_PAPER_API_KEY", "")
         self.api_secret = api_secret or os.environ.get("ALPACA_PAPER_API_SECRET", "")

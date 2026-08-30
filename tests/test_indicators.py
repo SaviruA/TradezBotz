@@ -13,6 +13,9 @@ from datetime import date, timedelta
 import pytest
 
 from tradezbotz.research.indicators import (
+    above_anchored_vwap,
+    anchored_vwap,
+    anchored_vwap_from_day,
     atr,
     above_ma,
     bollinger,
@@ -25,7 +28,10 @@ from tradezbotz.research.indicators import (
     percentile_rank,
     rsi,
     rsi_oversold,
+    relative_volume,
     sma,
+    swept_high,
+    swept_low,
     true_range,
 )
 from tradezbotz.research.prices import Bar
@@ -283,3 +289,152 @@ def test_selectors_are_safe_on_short_series():
     assert rsi_oversold(bars, 4) is False
     assert donchian_breakout(bars, 4) is False
     assert above_ma(bars, 4) is False
+
+
+# --- relative volume ---------------------------------------------------------
+
+def test_relative_volume_uses_median_not_mean():
+    """One earnings spike in the window must not mask the next real surge."""
+    bars = [Bar(date(2025, 1, 1), 100, 101, 99, 100, 1_000) for _ in range(20)]
+    bars[5] = Bar(date(2025, 1, 6), 100, 101, 99, 100, 100_000)   # outlier
+    bars.append(Bar(date(2025, 2, 1), 100, 101, 99, 100, 2_000))
+
+    assert relative_volume(bars, 20) == pytest.approx(2.0), "median ignores the spike"
+
+
+def test_relative_volume_none_before_window():
+    bars = bars_from(rising(30))
+    assert relative_volume(bars, 5) is None
+
+
+# --- anchored vwap -----------------------------------------------------------
+
+def test_anchored_vwap_starts_at_the_anchor_bar():
+    bars = bars_from(rising(30))
+    v = anchored_vwap(bars, 10)
+
+    assert v[9] is None, "nothing before the anchor"
+    assert v[10] is not None
+
+
+def test_anchored_vwap_uses_source_vwap_when_present():
+    bars = [Bar(date(2025, 1, 1), 100, 110, 90, 100, 1_000, vwap=105.0),
+            Bar(date(2025, 1, 2), 100, 110, 90, 100, 1_000, vwap=95.0)]
+
+    v = anchored_vwap(bars, 0)
+
+    assert v[0] == pytest.approx(105.0)
+    assert v[1] == pytest.approx(100.0), "volume-weighted mean of 105 and 95"
+
+
+def test_anchored_vwap_falls_back_to_typical_price():
+    bars = [Bar(date(2025, 1, 1), 100, 120, 60, 90, 1_000)]
+
+    assert anchored_vwap(bars, 0)[0] == pytest.approx(90.0), "(120+60+90)/3"
+
+
+def test_anchored_vwap_weights_by_volume():
+    """A huge-volume bar must dominate a thin one."""
+    bars = [Bar(date(2025, 1, 1), 10, 10, 10, 10, 1),
+            Bar(date(2025, 1, 2), 20, 20, 20, 20, 999_999)]
+
+    assert anchored_vwap(bars, 0)[1] == pytest.approx(20.0, abs=0.001)
+
+
+def test_anchored_vwap_is_causal():
+    """Appending later bars must not move an earlier anchored value."""
+    closes = rising(60)
+    short = anchored_vwap(bars_from(closes[:40]), 10)
+    long = anchored_vwap(bars_from(closes), 10)
+
+    assert short[39] == pytest.approx(long[39])
+
+
+def test_anchored_vwap_from_day_takes_next_session():
+    """A Friday-evening filing anchors to Monday, not to a non-existent bar."""
+    bars = bars_from(rising(20), start=date(2025, 1, 6))   # Mon 6 Jan onward
+    v = anchored_vwap_from_day(bars, date(2025, 1, 4))     # a Saturday
+
+    assert v[0] is not None, "anchored to the first session on or after"
+
+
+def test_anchored_vwap_from_day_before_all_bars_is_all_none():
+    bars = bars_from(rising(10), start=date(2025, 1, 6))
+
+    assert anchored_vwap_from_day(bars, date(2030, 1, 1)) == [None] * 10
+
+
+def test_above_anchored_vwap_selector():
+    bars = bars_from(rising(40))
+
+    assert above_anchored_vwap(bars, 35, anchor=10) is True, "uptrend sits above"
+    falling = bars_from([200 - i * 2 for i in range(40)])
+    assert above_anchored_vwap(falling, 35, anchor=10) is False
+
+
+# --- liquidity sweeps --------------------------------------------------------
+
+def sweep_bars(final, base_vol=1_000, n=25):
+    """A flat 100-104 range, then one bar that does something interesting."""
+    out = [Bar(date(2025, 1, 1) + timedelta(days=i), 102, 104, 100, 102, base_vol)
+           for i in range(n)]
+    out.append(final)
+    return out
+
+
+def test_swept_low_fires_on_a_stop_run_that_reclaims():
+    bars = sweep_bars(Bar(date(2025, 3, 1), 101, 103, 95, 102, 3_000))
+
+    assert swept_low(bars, 25) is True
+
+
+def test_swept_low_ignores_a_genuine_breakdown():
+    """Closing below the level is a breakdown, not a sweep. The reclaim is the
+    entire signal -- without it this is just a down day."""
+    bars = sweep_bars(Bar(date(2025, 3, 1), 101, 103, 95, 96, 3_000))
+
+    assert swept_low(bars, 25) is False
+
+
+def test_swept_low_requires_conviction_volume():
+    bars = sweep_bars(Bar(date(2025, 3, 1), 101, 103, 95, 102, 1_000))
+
+    assert swept_low(bars, 25) is False, "no volume surge, so noise"
+
+
+def test_swept_low_ignores_a_bar_inside_the_range():
+    bars = sweep_bars(Bar(date(2025, 3, 1), 101, 103, 100.5, 102, 5_000))
+
+    assert swept_low(bars, 25) is False, "never reached the liquidity"
+
+
+def test_swept_high_fires_on_a_failed_breakout():
+    bars = sweep_bars(Bar(date(2025, 3, 1), 103, 110, 102, 103, 3_000))
+
+    assert swept_high(bars, 25) is True
+
+
+def test_swept_high_ignores_a_breakout_that_holds():
+    bars = sweep_bars(Bar(date(2025, 3, 1), 103, 110, 102, 109, 3_000))
+
+    assert swept_high(bars, 25) is False
+
+
+def test_sweep_and_breakout_partition_the_same_event():
+    """A bar piercing the prior high is either a breakout or a sweep, never
+    both. If they overlapped, a breakout result could really be a sweep result."""
+    held = sweep_bars(Bar(date(2025, 3, 1), 103, 110, 102, 109, 3_000))
+    failed = sweep_bars(Bar(date(2025, 3, 1), 103, 110, 102, 103, 3_000))
+
+    assert donchian_breakout(held, 25) is True
+    assert swept_high(held, 25) is False
+    assert donchian_breakout(failed, 25) is False
+    assert swept_high(failed, 25) is True
+
+
+def test_sweeps_are_safe_on_short_series():
+    bars = bars_from(rising(5))
+
+    assert swept_low(bars, 4) is False
+    assert swept_high(bars, 4) is False
+    assert relative_volume(bars, 4) is None
