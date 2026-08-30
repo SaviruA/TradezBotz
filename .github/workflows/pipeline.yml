@@ -23,7 +23,10 @@ on:
         default: "120"
       backfill_symbols:
         description: "Symbols to price-backfill this run"
-        default: "600"
+        default: "4000"
+      requeue:
+        description: "Refetch symbols already marked done (after a vendor or basis change)"
+        default: "false"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -113,12 +116,43 @@ jobs:
         # all transaction codes do -- at 5 req/min that is 5h instead of 15h.
         run: python -m tradezbotz enqueue-symbols --buys-only
 
+      # Alpaca, not Massive. Measured: 2,989 symbols/hour against Massive's 242,
+      # and history to 2016 rather than two years -- so the whole universe is
+      # roughly an hour instead of fourteen, even fetching both adjustment bases.
+      # That is what frees budget for the crosscheck and intraday steps below.
       - name: Backfill prices
         env:
-          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+          ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
         run: |
           python -m tradezbotz backfill \
-            --limit "${{ github.event.inputs.backfill_symbols || 600 }}"
+            --limit "${{ github.event.inputs.backfill_symbols || 4000 }}" \
+            ${{ github.event.inputs.requeue == 'true' && '--requeue' || '' }}
+
+      # Three-way, so a disagreement can be attributed rather than merely noted.
+      # Massive and Yahoo are price-only, Alpaca is total-return; without the
+      # third source that difference reads as a data fault on ~15 symbols in 24.
+      - name: Crosscheck price sources
+        continue-on-error: true
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+          ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+        run: |
+          pip install --quiet openbb-yfinance
+          python -m tradezbotz crosscheck --three-way --limit 250
+
+      # Time-boxed: this is the one step whose cost scales with symbols x
+      # sessions, so it gets a budget rather than a symbol count and resumes
+      # from its own checkpoint next run.
+      - name: Reduce intraday sessions
+        continue-on-error: true
+        env:
+          ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+          ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+        run: |
+          python -m tradezbotz backfill-intraday \
+            --days 180 --minutes 60 --batch 50
 
       - name: Status
         env:

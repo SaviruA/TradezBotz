@@ -76,6 +76,11 @@ class Series:
     requested_start: date
     requested_end: date
     is_active: bool | None = None
+    #: Which adjustment basis these bars are on. Carried on the series rather
+    #: than tracked by the caller because mixing bases inside one return
+    #: calculation does not produce a small error -- it fabricates a return on
+    #: every ex-dividend date.
+    basis: str = "price"
 
     @property
     def first_day(self) -> date | None:
@@ -122,23 +127,45 @@ class RateLimiter:
             return waited
 
 
+#: Split-adjusted only. This is what a share actually printed at, and it is the
+#: basis Massive and Yahoo serve. Never revised except by a split, so a cached
+#: history stays reproducible.
+BASIS_PRICE = "price"
+
+#: Split *and* dividend adjusted -- a total-return series, which is what a
+#: holder actually earned. Revised every time a distribution is paid, so a
+#: cached history drifts from the vendor over time. Kept alongside rather than
+#: instead of BASIS_PRICE: on a 5-day horizon the difference is ~0.03% for a
+#: typical name but ~0.2% for a REIT or BDC, and that error is systematic within
+#: dividend payers rather than random across them. Reporting both makes a result
+#: that depends on the choice visible instead of silent.
+BASIS_TOTAL = "total"
+
+BASES = (BASIS_PRICE, BASIS_TOTAL)
+
+#: Alpaca's `adjustment` parameter for each basis.
+ALPACA_ADJUSTMENT = {BASIS_PRICE: "split", BASIS_TOTAL: "all"}
+
 CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
     symbol TEXT NOT NULL,
     day    TEXT NOT NULL,
+    basis  TEXT NOT NULL DEFAULT 'price',
     open   REAL NOT NULL,
     high   REAL NOT NULL,
     low    REAL NOT NULL,
     close  REAL NOT NULL,
     volume REAL NOT NULL,
-    PRIMARY KEY (symbol, day)
+    PRIMARY KEY (symbol, day, basis)
 );
 CREATE TABLE IF NOT EXISTS fetches (
-    symbol     TEXT PRIMARY KEY,
+    symbol     TEXT NOT NULL,
+    basis      TEXT NOT NULL DEFAULT 'price',
     start_day  TEXT NOT NULL,
     end_day    TEXT NOT NULL,
     is_active  INTEGER,
-    fetched_at TEXT NOT NULL
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, basis)
 );
 """
 
@@ -157,27 +184,64 @@ class PriceCache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._migrate()
         self._conn.executescript(CACHE_SCHEMA)
+        self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add the `basis` dimension to a cache written before it existed.
+
+        Everything already stored came from Massive, which serves a price-only
+        (split-adjusted) series -- established by three-way comparison, where
+        Massive and Yahoo agreed to 0.00% while Alpaca sat below both by the
+        accumulated dividend. So existing rows are stamped BASIS_PRICE.
+
+        SQLite cannot alter a primary key, so the tables are rebuilt. Worth the
+        care: the CI cache holds ~2,200 symbols that would take many hours to
+        refetch at Massive's 5 requests/minute.
+        """
+        have = {r[0] for r in self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("bars", "fetches"):
+            if table not in have:
+                continue
+            cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")]
+            if "basis" in cols:
+                continue
+            keep = ", ".join(cols)
+            self._conn.execute(f"ALTER TABLE {table} RENAME TO {table}_pre_basis")
+            self._conn.executescript(CACHE_SCHEMA)
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({keep}, basis) "
+                f"SELECT {keep}, ? FROM {table}_pre_basis",
+                (BASIS_PRICE,),
+            )
+            self._conn.execute(f"DROP TABLE {table}_pre_basis")
         self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
 
-    def covered(self, symbol: str, start: date, end: date) -> bool:
+    def covered(self, symbol: str, start: date, end: date,
+                basis: str = BASIS_PRICE) -> bool:
         row = self._conn.execute(
-            "SELECT start_day, end_day FROM fetches WHERE symbol = ?", (symbol,)
+            "SELECT start_day, end_day FROM fetches WHERE symbol = ? AND basis = ?",
+            (symbol, basis),
         ).fetchone()
         if not row:
             return False
         return row["start_day"] <= start.isoformat() and row["end_day"] >= end.isoformat()
 
-    def get(self, symbol: str, start: date, end: date) -> Series:
+    def get(self, symbol: str, start: date, end: date,
+            basis: str = BASIS_PRICE) -> Series:
         rows = self._conn.execute(
-            "SELECT * FROM bars WHERE symbol = ? AND day BETWEEN ? AND ? ORDER BY day",
-            (symbol, start.isoformat(), end.isoformat()),
+            "SELECT * FROM bars WHERE symbol = ? AND basis = ? "
+            "AND day BETWEEN ? AND ? ORDER BY day",
+            (symbol, basis, start.isoformat(), end.isoformat()),
         ).fetchall()
         meta = self._conn.execute(
-            "SELECT is_active FROM fetches WHERE symbol = ?", (symbol,)
+            "SELECT is_active FROM fetches WHERE symbol = ? AND basis = ?",
+            (symbol, basis),
         ).fetchone()
         active = None if meta is None or meta["is_active"] is None else bool(meta["is_active"])
         return Series(
@@ -193,20 +257,25 @@ class PriceCache:
             requested_start=start,
             requested_end=end,
             is_active=active,
+            basis=basis,
         )
 
     def put(self, series: Series) -> None:
         self._conn.executemany(
-            "INSERT OR REPLACE INTO bars VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO bars (symbol, day, basis, open, high, low, "
+            "close, volume) VALUES (?,?,?,?,?,?,?,?)",
             [
-                (series.symbol, b.day.isoformat(), b.open, b.high, b.low, b.close, b.volume)
+                (series.symbol, b.day.isoformat(), series.basis,
+                 b.open, b.high, b.low, b.close, b.volume)
                 for b in series.bars
             ],
         )
         self._conn.execute(
-            "INSERT OR REPLACE INTO fetches VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO fetches (symbol, basis, start_day, end_day, "
+            "is_active, fetched_at) VALUES (?,?,?,?,?,?)",
             (
                 series.symbol,
+                series.basis,
                 series.requested_start.isoformat(),
                 series.requested_end.isoformat(),
                 None if series.is_active is None else int(series.is_active),
@@ -215,8 +284,17 @@ class PriceCache:
         )
         self._conn.commit()
 
-    def symbols(self) -> list[str]:
-        return [r[0] for r in self._conn.execute("SELECT symbol FROM fetches ORDER BY symbol")]
+    def symbols(self, basis: str | None = None) -> list[str]:
+        """Symbols held. With no basis, any basis counts."""
+        if basis is None:
+            return [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT symbol FROM fetches ORDER BY symbol")]
+        return [r[0] for r in self._conn.execute(
+            "SELECT symbol FROM fetches WHERE basis = ? ORDER BY symbol", (basis,))]
+
+    def bases(self, symbol: str) -> list[str]:
+        return [r[0] for r in self._conn.execute(
+            "SELECT basis FROM fetches WHERE symbol = ? ORDER BY basis", (symbol,))]
 
 
 class MassivePriceSource:
@@ -370,6 +448,7 @@ class AlpacaPriceSource:
         per_minute: int = ALPACA_REQUESTS_PER_MINUTE,
         session: requests.Session | None = None,
         feed: str = "sip",
+        basis: str = BASIS_PRICE,
     ) -> None:
         self.api_key = api_key or os.environ.get("ALPACA_PAPER_API_KEY", "")
         self.api_secret = api_secret or os.environ.get("ALPACA_PAPER_API_SECRET", "")
@@ -382,6 +461,9 @@ class AlpacaPriceSource:
         self.limiter = RateLimiter(per_minute)
         self.session = session or requests.Session()
         self.feed = feed
+        if basis not in ALPACA_ADJUSTMENT:
+            raise PriceError(f"unknown basis {basis!r}; expected one of {BASES}")
+        self.basis = basis
 
     def _end_param(self, end: date) -> str:
         """Clamp the window out of the SIP embargo.
@@ -402,8 +484,8 @@ class AlpacaPriceSource:
 
     def daily_bars(self, symbol: str, start: date, end: date) -> Series:
         symbol = symbol.upper()
-        if self.cache and self.cache.covered(symbol, start, end):
-            return self.cache.get(symbol, start, end)
+        if self.cache and self.cache.covered(symbol, start, end, self.basis):
+            return self.cache.get(symbol, start, end, self.basis)
 
         bars: list[Bar] = []
         page: str | None = None
@@ -414,9 +496,12 @@ class AlpacaPriceSource:
                 "timeframe": "1Day",
                 "start": start.isoformat(),
                 "end": end_param,
-                # Split- and dividend-adjusted, matching what we ask Massive for.
-                # Mismatched adjustment would show up as fake disagreement.
-                "adjustment": "all",
+                # The basis is explicit, never assumed. `split` is price-only
+                # and matches what Massive and Yahoo serve; `all` adds dividend
+                # adjustment. Defaulting to `all` while treating the result as
+                # comparable to Massive is exactly the mistake that produced the
+                # bogus "54% agree" finding.
+                "adjustment": ALPACA_ADJUSTMENT[self.basis],
                 "feed": self.feed,
                 "limit": 10000,
             }
@@ -454,6 +539,7 @@ class AlpacaPriceSource:
         series = Series(
             symbol=symbol, bars=tuple(bars),
             requested_start=start, requested_end=end, is_active=None,
+            basis=self.basis,
         )
         if self.cache:
             self.cache.put(series)
@@ -541,3 +627,62 @@ class OpenBBPriceSource:
             symbol=symbol, bars=tuple(bars),
             requested_start=start, requested_end=end, is_active=None,
         )
+
+
+class DualBasisSource:
+    """Fetches both adjustment bases for every symbol, caching each separately.
+
+    Satisfies `PriceSource`, so `BackfillRunner` needs no change: it counts one
+    symbol done when both bases have landed.
+
+    **Why both rather than a choice.** Price-only is what a share printed at and
+    is never revised; total return is what a holder actually earned. On a 5-day
+    horizon they differ by ~0.03% for a typical name and ~0.2% for a REIT or BDC
+    -- small, but systematic *within* dividend payers rather than random across
+    them, which is the kind of error that looks like a finding. Storing both
+    lets every result be reported on both, so a conclusion that depends on the
+    choice is visible rather than silent. It is the same reasoning that makes
+    `backtest` report winsorised returns beside raw ones.
+
+    **Why this is affordable at all.** Two requests per symbol against Alpaca's
+    200/minute is still roughly twenty times faster than one request against
+    Massive's 5/minute -- the difference between a fourteen-hour backfill and a
+    twenty-minute one.
+    """
+
+    def __init__(self, sources: dict[str, PriceSource],
+                 primary: str = BASIS_PRICE) -> None:
+        missing = [b for b in BASES if b not in sources]
+        if missing:
+            raise PriceError(f"no source supplied for basis {missing}")
+        self.sources = sources
+        self.primary = primary
+
+    @classmethod
+    def alpaca(cls, cache: PriceCache | None = None,
+               per_minute: int = ALPACA_REQUESTS_PER_MINUTE,
+               **kwargs) -> "DualBasisSource":
+        """Both bases from Alpaca, sharing one rate limiter.
+
+        The limiter is shared deliberately: two sources each self-limiting to
+        200/min would together run at 400/min and be throttled.
+        """
+        limiter = RateLimiter(per_minute)
+        sources: dict[str, PriceSource] = {}
+        for basis in BASES:
+            src = AlpacaPriceSource(cache=cache, basis=basis, **kwargs)
+            src.limiter = limiter
+            sources[basis] = src
+        return cls(sources)
+
+    def daily_bars(self, symbol: str, start: date, end: date) -> Series:
+        """Fetch every basis; return the primary one.
+
+        A failure on any basis propagates rather than being swallowed. Half a
+        symbol is worse than none: the runner would mark it done and the missing
+        basis would surface later as a silent coverage hole.
+        """
+        out: dict[str, Series] = {}
+        for basis in BASES:
+            out[basis] = self.sources[basis].daily_bars(symbol, start, end)
+        return out[self.primary]

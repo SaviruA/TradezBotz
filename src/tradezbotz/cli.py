@@ -38,6 +38,12 @@ PRICE_WINDOW_DAYS = 730
 #: not be collapsed into one number.
 BASELINE_DAYS = 1825  # ~5 years
 
+#: Alpaca's consolidated feed serves minute and daily bars back to 2016, against
+#: Massive's two years. Verified by probe, not read off a pricing page. This is
+#: what makes a real holdout possible: two years of history leaves almost
+#: nothing to hold out, and a holdout you cannot afford to lock is not one.
+ALPACA_HISTORY_DAYS = 3800  # ~2016 onward
+
 #: Retained for callers that predate the split.
 HISTORY_DAYS = PRICE_WINDOW_DAYS
 
@@ -280,19 +286,48 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     return 0
 
 
-def _make_runner(limit_per_minute: int | None = None):
-    from .research.backfill import BackfillRunner
-    from .research.prices import DEFAULT_REQUESTS_PER_MINUTE, MassivePriceSource, PriceCache
+def _make_runner(limit_per_minute: int | None = None, *, vendor: str = "alpaca",
+                 history_days: int | None = None):
+    """Build the price backfill.
 
-    source = MassivePriceSource(
-        cache=PriceCache(DEFAULT_STATE / BARS_DB),
-        per_minute=limit_per_minute or DEFAULT_REQUESTS_PER_MINUTE,
+    Alpaca by default. The reason is arithmetic: Massive's free tier allows 5
+    requests/minute, which measured out at 242 symbols/hour and made a
+    3,373-symbol universe a fourteen-hour job that never finished inside a
+    six-hour CI run. Alpaca allows 200/minute and serves history back to 2016
+    against Massive's two years. Even fetching both adjustment bases -- two
+    requests per symbol instead of one -- it is roughly twenty times faster.
+
+    Massive stays reachable with `--vendor massive`, and remains a crosscheck
+    source. It is no longer the bottleneck for coverage.
+    """
+    from .research.backfill import BackfillRunner
+    from .research.prices import (
+        ALPACA_REQUESTS_PER_MINUTE,
+        DEFAULT_REQUESTS_PER_MINUTE,
+        DualBasisSource,
+        MassivePriceSource,
+        PriceCache,
     )
+
+    cache = PriceCache(DEFAULT_STATE / BARS_DB)
+    if vendor == "massive":
+        source = MassivePriceSource(
+            cache=cache,
+            per_minute=limit_per_minute or DEFAULT_REQUESTS_PER_MINUTE,
+        )
+        window = PRICE_WINDOW_DAYS
+    else:
+        source = DualBasisSource.alpaca(
+            cache=cache,
+            per_minute=limit_per_minute or ALPACA_REQUESTS_PER_MINUTE,
+        )
+        window = history_days or ALPACA_HISTORY_DAYS
+
     end = date.today()
     return BackfillRunner(
         source,
         DEFAULT_STATE / CHECKPOINT_DB,
-        start=end - timedelta(days=PRICE_WINDOW_DAYS),
+        start=end - timedelta(days=window),
         end=end,
     )
 
@@ -306,7 +341,11 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 
 
 def _run_backfill(args: argparse.Namespace) -> int:
-    runner = _make_runner(args.per_minute)
+    runner = _make_runner(args.per_minute, vendor=args.vendor,
+                          history_days=args.days)
+    if args.requeue:
+        n = runner.requeue()
+        print(f"requeued {n} finished symbols: what 'done' means has changed")
     runner.install_signal_handlers()
 
     def report(symbol: str, prog) -> None:
@@ -426,11 +465,25 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     bars_path = DEFAULT_STATE / BARS_DB
     if bars_path.exists():
+        from .research.prices import BASES
         cache = PriceCache(bars_path)
         print(f"symbols cached   : {len(cache.symbols())}")
+        # Per basis, because a symbol holding only one is half-migrated and
+        # nothing else in the data would say so.
+        for basis in BASES:
+            print(f"  basis {basis:8s}   : {len(cache.symbols(basis))}")
         cache.close()
     else:
         print("symbols cached   : none")
+
+    profiles_path = DEFAULT_STATE / PROFILES_DB
+    if profiles_path.exists():
+        from .research.intraday import ProfileStore
+        store = ProfileStore(profiles_path)
+        print(f"intraday sessions: {store.count():,} over {len(store.symbols())} symbols")
+        store.close()
+    else:
+        print("intraday sessions: none")
 
     ckpt = DEFAULT_STATE / CHECKPOINT_DB
     if ckpt.exists():
@@ -599,6 +652,16 @@ def build_parser() -> argparse.ArgumentParser:
     bf = sub.add_parser("backfill", help="fetch daily bars for queued symbols")
     bf.add_argument("--limit", type=int, help="stop after N symbols this run")
     bf.add_argument("--per-minute", type=int, help="override the request budget")
+    bf.add_argument("--vendor", choices=("alpaca", "massive"), default="alpaca",
+                    help="alpaca (default) stores both adjustment bases at "
+                         "200 req/min; massive is price-only at 5 req/min")
+    bf.add_argument("--days", type=int,
+                    help="history window; defaults to 2016 onward for alpaca, "
+                         "730 days for massive")
+    bf.add_argument("--requeue", action="store_true",
+                    help="return finished symbols to the queue. Needed after a "
+                         "vendor or basis change, where 'done' now means "
+                         "something different than it did")
     bf.set_defaults(func=cmd_backfill)
 
     xc = sub.add_parser("crosscheck",
