@@ -23,6 +23,7 @@ DEFAULT_STATE = Path(os.environ.get("TRADEZBOTZ_STATE", "state"))
 EVENTS_DB = "events.db"
 BARS_DB = "bars.db"
 CHECKPOINT_DB = "backfill.db"
+PROFILES_DB = "profiles.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Free-tier price history ceiling. Events older than this can never be
@@ -412,6 +413,110 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_intraday(args: argparse.Namespace) -> int:
+    """Reduce sessions to volume profiles and order flow.
+
+    Volume profile and order flow cannot be computed from daily bars at all, so
+    this is the only path that makes either testable. Each session is fetched
+    once, reduced to a compact histogram plus flow statistics, and stored -- raw
+    minute bars are never kept, because the universe over a couple of years is
+    on the order of 10^8 of them.
+
+    Two cost profiles, deliberately separated:
+
+      minute bars   batched across symbols, so one request covers up to 100
+                    names. Cheap enough to run over the whole universe.
+      trades+quotes one symbol at a time, and the only way to get order flow
+                    that is actually order flow. `--exact` opts in.
+
+    The `--exact` distinction is not a performance knob. Measured against real
+    prints on four small caps, minute-bar tick-rule delta agreed with tick-level
+    Lee-Ready on *sign* once in four. Without `--exact` the stored delta is
+    labelled `tick_minute` and should be read as "direction of minute closes",
+    which is a different hypothesis rather than a cheaper version of this one.
+    """
+    from .lock import SingleInstance
+    from .research.intraday import (
+        AlpacaIntradaySource,
+        ProfileStore,
+        SIP_DELAY_MINUTES,
+        group_by_session,
+    )
+    from .research.microstructure import build_profile, with_exact_flow
+    from .research.prices import PriceCache
+
+    # Its own lock, not the shared "ingest" one: this path talks to Alpaca, not
+    # EDGAR, so it can safely run alongside a filing ingest.
+    lock = SingleInstance("intraday", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        cache = PriceCache(DEFAULT_STATE / BARS_DB)
+        symbols = cache.symbols()
+        cache.close()
+        if args.symbols:
+            symbols = [s.strip().upper() for s in args.symbols.split(",")]
+        if not symbols:
+            print("no cached symbols; run backfill first")
+            return 1
+        symbols = symbols[: args.limit] if args.limit else symbols
+
+        store = ProfileStore(DEFAULT_STATE / PROFILES_DB)
+        source = AlpacaIntradaySource()
+
+        # Never request into the SIP embargo; `end` is exclusive.
+        latest = (datetime.now(timezone.utc) - timedelta(minutes=SIP_DELAY_MINUTES)).date()
+        end = min(date.today(), latest)
+        start = end - timedelta(days=args.days)
+
+        deadline = time.monotonic() + args.minutes * 60 if args.minutes else None
+        built = skipped = exact_done = 0
+
+        for i in range(0, len(symbols), args.batch):
+            if deadline and time.monotonic() > deadline:
+                print("time budget reached; state is checkpointed")
+                break
+            chunk = symbols[i : i + args.batch]
+            try:
+                bars_by_symbol = source.minute_bars(chunk, start, end)
+            except Exception as exc:                      # noqa: BLE001
+                print(f"  batch {i // args.batch}: {type(exc).__name__}: {exc}")
+                continue
+
+            for symbol, bars in bars_by_symbol.items():
+                for day, session in group_by_session(bars).items():
+                    if store.was_fetched(symbol, day):
+                        skipped += 1
+                        continue
+                    profile = build_profile(symbol, day, session)
+                    if profile is None:
+                        # A real session with no prints. Recorded as attempted so
+                        # the next run does not ask again.
+                        store.mark_fetched(symbol, day)
+                        continue
+                    if args.exact:
+                        try:
+                            trades = source.trades(symbol, day, limit_pages=args.trade_pages)
+                            quotes = source.quotes(symbol, day, limit_pages=args.quote_pages)
+                            if trades:
+                                profile = with_exact_flow(profile, trades, quotes)
+                                exact_done += 1
+                        except Exception as exc:          # noqa: BLE001
+                            print(f"  {symbol} {day}: flow unavailable ({exc})")
+                    store.put(profile)
+                    built += 1
+
+            print(f"  {min(i + args.batch, len(symbols))}/{len(symbols)} symbols  "
+                  f"sessions built {built:,}  skipped {skipped:,}"
+                  + (f"  exact flow {exact_done:,}" if args.exact else ""))
+
+        print(f"\nstored sessions : {store.count():,}")
+        print(f"symbols covered : {len(store.symbols())}")
+        store.close()
+        return 0
+    finally:
+        lock.release()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradezbotz")
     sub = p.add_subparsers(dest="command", required=True)
@@ -472,6 +577,26 @@ def build_parser() -> argparse.ArgumentParser:
     xc.add_argument("--per-minute", type=int, default=180,
                     help="Alpaca allows 200/min on the free plan")
     xc.set_defaults(func=cmd_crosscheck)
+
+    itd = sub.add_parser("backfill-intraday",
+                         help="reduce sessions to volume profiles and order flow")
+    itd.add_argument("--days", type=int, default=180,
+                     help="how far back to reduce sessions")
+    itd.add_argument("--limit", type=int, default=0, help="cap symbols processed")
+    itd.add_argument("--symbols", default="", help="comma-separated override")
+    itd.add_argument("--batch", type=int, default=50,
+                     help="symbols per multi-symbol bar request")
+    itd.add_argument("--minutes", type=int, default=0,
+                     help="stop after N minutes; state is checkpointed")
+    itd.add_argument("--exact", action="store_true",
+                     help="classify flow from trades and quotes (Lee-Ready) "
+                          "instead of minute closes; far slower and the only "
+                          "version that actually measures order flow")
+    itd.add_argument("--trade-pages", type=int, default=3,
+                     help="cap trade pagination per session under --exact")
+    itd.add_argument("--quote-pages", type=int, default=6,
+                     help="cap quote pagination per session under --exact")
+    itd.set_defaults(func=cmd_backfill_intraday)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)

@@ -72,23 +72,52 @@ only trial budget.
 
 ---
 
-## The two blockers, precisely
+## The blockers are cleared
 
-Volume profile and order flow are not blocked by cost or by API access. They are
-blocked by the fact that the pipeline fetches and stores **daily bars only**
-(`prices.PriceSource.daily_bars`, `timeframe=1Day`), and both concepts are
-defined on intraday data:
+Both were unblocked on 2026-08-30 by building the intraday fetch and store path
+(`research/intraday.py`, `research/microstructure.py`, `tradezbotz
+backfill-intraday`). Sessions are reduced once to a compact price histogram plus
+flow statistics and stored at ~600 bytes each, so the full universe projects to
+roughly 110MB rather than the ~10^8 raw minute bars it would otherwise take.
 
-- **Volume profile** needs volume bucketed by price *within* a session. A daily
-  bar reports one volume for the whole day, so the point of control and value
-  area cannot be recovered from it at all — not approximately, not badly. There
-  is no daily-bar version of this indicator.
-- **Order flow** needs trades classified by aggressor side (buyer- or
-  seller-initiated). That requires trade prints and the prevailing quote, then a
-  tick-rule or Lee-Ready classification. Nothing in a daily OHLCV bar carries it.
+Verified end to end against live data: 60 sessions across four small caps, with
+exact Lee-Ready flow classification on every one.
 
-Both are unblocked by the same piece of work: an intraday fetch and store path.
-See `docs/INTRADAY.md` for what the data probe found.
+## The order flow warning that must not be lost
+
+There are two ways to sign volume, and **they do not agree**:
+
+| | source | cost | correct? |
+| --- | --- | --- | --- |
+| `tick_minute` | direction of minute closes | free, comes with the bars | no |
+| `lee_ready` | prints against the prevailing NBBO | one request per symbol-day | yes |
+
+Measured against real prints on four small caps for 2026-08-24:
+
+| symbol | minute-bar delta | Lee-Ready delta | agree on sign? |
+| --- | --- | --- | --- |
+| XELB | +0.0123 | -0.1133 | no |
+| RCG | -0.0078 | +0.3649 | no |
+| GNSS | +0.0396 | -0.1118 | no |
+| IMTE | -0.0564 | -0.3519 | yes (6x magnitude) |
+
+**One in four.** The cheap classifier is not a lower-resolution version of the
+expensive one; it measures something else. A minute containing 500 buys and 500
+sells nets to whatever its close did, and the tick rule sees one signed number.
+
+Consequences, all enforced in code:
+
+1. `backfill-intraday --exact` is what produces usable order flow. Without it
+   the stored delta is labelled `tick_minute`.
+2. `SessionProfile.flow_method` records which classifier ran, and
+   `delta_ratio` / `cumulative_delta` **raise** on a window mixing the two
+   rather than averaging a measurement against its own error.
+3. `tick_minute` delta is still worth testing -- as its own hypothesis, named
+   honestly as "direction of minute closes", not as order flow.
+
+Affordability is why exact classification is realistic at all: insider buying
+concentrates in small caps, and a full session of those is 127-1,227 prints. A
+mega-cap session is millions and is not attempted.
 
 ## The liquidity sweep caveat
 

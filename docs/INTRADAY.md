@@ -64,11 +64,29 @@ would only bite if we ever wanted genuine intraday execution.
    2 years, which materially changes how much out-of-sample room the holdout
    split has.
 
+## Built on this (2026-08-30)
+
+- `research/intraday.py` -- batched minute-bar fetch, trades/quotes, and a
+  `ProfileStore` holding reduced sessions at ~600 bytes each
+- `research/microstructure.py` -- volume profile (POC, 70% value area, low-volume
+  nodes), tick-rule and Lee-Ready flow classification, and `compare_classifiers`
+- `tradezbotz backfill-intraday [--exact]`
+
+Two bugs the live probe caught that unit tests would not have:
+
+1. **Date-granular embargo guard.** A window ending "today" is expanded by the
+   API to cover today's session, breaching the 15-minute SIP embargo and
+   returning 403 for the *entire batch* -- so a valid month-long backfill died on
+   its most recent day. Now clamped to an explicit `now - 16m` timestamp, which
+   also keeps today's session usable right up to the embargo.
+2. **Lexicographic timestamp ordering.** Alpaca omits the fractional part when
+   it is zero, and `.` sorts below `Z`, so `...:58Z` compared as *later* than
+   `...:58.267Z`. Quote lookup used string comparison, which silently paired some
+   prints with a quote that came after them. Now parsed to datetimes.
+
 ## Next build
 
-- extend `PriceSource` with an intraday method and a bar cache keyed by
-  symbol-minute
-- volume profile: bucket minute volume by price, derive POC and value area
-- order flow: tick-rule aggressor classification from trades, upgraded to
-  Lee-Ready where quotes are available; then signed volume and cumulative delta
+- run `backfill-intraday --exact` across the universe and wire it into
+  `pipeline.yml`
 - re-run `crosscheck` on `sip` and correct the README's adjustment section
+- register the new hypotheses as trials and measure them, individually and paired
