@@ -101,6 +101,17 @@ jobs:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: python -m tradezbotz ingest-edgar --days 100 --max-minutes 45
 
+      # 8-K and 424B. These exist because news does not cover our universe:
+      # NVDA drew 200+ articles in a month while XELB and ARI drew zero, yet
+      # XELB filed eleven 8-Ks that year. Disclosure obligations do not scale
+      # with market cap; journalist attention does.
+      - name: Ingest 8-K and 424B filings
+        continue-on-error: true
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python -m tradezbotz ingest-filings --days 400 --max-minutes 45
+
       # ApeWisdom serves only a current snapshot -- no history exists at any
       # price. Sentiment can therefore never be backfilled, only accumulated,
       # so every run that skips this loses a day permanently. Cheap (~20s) and

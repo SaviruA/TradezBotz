@@ -600,6 +600,76 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_ingest_filings(args: argparse.Namespace) -> int:
+    """Ingest 8-K material events and 424B offerings.
+
+    These exist because news does not cover our universe. Measured against the
+    Benzinga feed, NVDA drew 200+ articles in a month while XELB and ARI drew
+    zero -- yet XELB filed eleven 8-Ks that year and ARI six. Disclosure
+    obligations do not scale with market cap; journalist attention does.
+    """
+    from .lock import SingleInstance
+    from .research.edgar import EdgarClient
+    from .research.eventstore import EventStore
+    from .research.filings import FORMS_424B, ingest_day
+
+    forms: tuple[str, ...] = ()
+    if args.kind in ("both", "8-K"):
+        forms += ("8-K",)
+    if args.kind in ("both", "424B"):
+        forms += FORMS_424B
+
+    end = args.end or date.today()
+    start = args.start or (end - timedelta(days=args.days))
+
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        client = EdgarClient()
+        client.verify_access()
+        store = EventStore(DEFAULT_STATE / EVENTS_DB)
+        deadline = time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
+
+        # Newest first, same reasoning as the Form 4 path: a time-boxed run that
+        # never finishes should still keep the recent window fresh.
+        days = [
+            start + timedelta(days=i)
+            for i in range((end - start).days + 1)
+            if (start + timedelta(days=i)).weekday() < 5
+        ]
+        days.reverse()
+
+        total = skipped = 0
+        for day in days:
+            if deadline and time.monotonic() > deadline:
+                print("time budget reached; remaining days left for next run",
+                      flush=True)
+                break
+            marker = f"sec_filings_{args.kind}"
+            if not args.force and store.day_ingested(marker, day):
+                skipped += 1
+                continue
+            events = []
+            for parsed in ingest_day(client, day, forms):
+                try:
+                    events.append(parsed.to_event())
+                except Exception:  # noqa: BLE001
+                    continue
+            new = store.record_many(events)
+            if events:
+                store.mark_day_ingested(marker, day, len(events))
+            total += new
+            print(f"{day}  filings {len(events):5d}  new {new:5d}", flush=True)
+
+        print(f"\ndays done, {skipped} already ingested")
+        print(f"total new events: {total}")
+        print(f"event store total: {store.count()}")
+        store.close()
+        return 0
+    finally:
+        lock.release()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradezbotz")
     sub = p.add_subparsers(dest="command", required=True)
@@ -694,6 +764,18 @@ def build_parser() -> argparse.ArgumentParser:
     itd.add_argument("--quote-pages", type=int, default=6,
                      help="cap quote pagination per session under --exact")
     itd.set_defaults(func=cmd_backfill_intraday)
+
+    fil = sub.add_parser("ingest-filings",
+                         help="pull 8-K material events and 424B offerings")
+    fil.add_argument("--days", type=int, default=365, help="how far back to go")
+    fil.add_argument("--start", type=date.fromisoformat)
+    fil.add_argument("--end", type=date.fromisoformat)
+    fil.add_argument("--kind", choices=("both", "8-K", "424B"), default="both")
+    fil.add_argument("--max-minutes", type=int, default=0,
+                     help="stop after N minutes; days are checkpointed")
+    fil.add_argument("--force", action="store_true",
+                     help="re-ingest days already marked done")
+    fil.set_defaults(func=cmd_ingest_filings)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)
