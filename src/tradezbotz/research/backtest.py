@@ -115,6 +115,21 @@ class BacktestResult:
     #: Median round-trip cost actually charged, in basis points.
     median_cost_bps: float = 0.0
     costed: bool = False
+    #: t-statistic with a two-way cluster-robust standard error (symbol x date).
+    #: This is the one to read. `t_stat` above assumes independent draws, which
+    #: on this data is false: on simulated noise with our dependence structure
+    #: the naive statistic rejected a true null 57% of the time at alpha = 5%.
+    t_stat_clustered: float = 0.0
+    #: Independence-equivalent observation count, derived from the measured
+    #: standard-error inflation. This is what the DSR is given.
+    n_effective: float = 0.0
+    #: Average pairwise correlation implied by same-date co-movement.
+    rho: float = 0.0
+    #: How much the naive standard error understates the clustered one.
+    se_inflation: float = 1.0
+    #: False when either clustering dimension has too few groups for the
+    #: correction itself to be trustworthy.
+    clusters_sufficient: bool = True
     coverage: dict = field(default_factory=dict)
     notes: str = ""
 
@@ -155,17 +170,36 @@ class BacktestResult:
 
     @property
     def clustered(self) -> bool:
-        """Whether observations are too concentrated for the t-stat to mean much.
+        """Whether observations are concentrated on few symbols.
 
         Overlapping events on one symbol are not independent draws: 154 filings
-        on a $1.84 micro-cap trace one price path, not 154 outcomes. Both the
-        t-stat and the DSR assume independence, so a clustered sample inflates
-        both. Effective sample size is nearer the count of distinct
-        symbol-episodes than the trade count.
+        on a $1.84 micro-cap trace one price path, not 154 outcomes.
+
+        This is now a *description*, not a disqualification. It used to mean
+        "this result is unusable". Since the standard error is cluster-robust
+        and the DSR receives the effective sample size, the dependence is
+        corrected for rather than merely flagged -- a clustered result can be
+        believed now, it simply needed a far larger raw edge to get here.
         """
         if self.n_trades < 30 or self.n_symbols == 0:
             return False
         return (self.n_trades / self.n_symbols) > 5 or self.top_symbol_share > 0.15
+
+    @property
+    def dependence_severe(self) -> bool:
+        """Whether dependence has consumed most of the nominal sample.
+
+        `n_effective == 0` is the extreme, not an absence of one: it means every
+        observation fell in a single cluster, so there is no between-cluster
+        variation to estimate a standard error from at all. Reading that as
+        "not severe" would let the most degenerate possible sample through
+        unflagged, which is the opposite of what this is for.
+        """
+        if self.n_trades < 30:
+            return False
+        if self.n_effective <= 0:
+            return True
+        return (self.n_effective / self.n_trades) < 0.25
 
     def summary(self) -> str:
         return (
@@ -186,10 +220,26 @@ class BacktestResult:
                 "is a small-cap strategy."
             )
             + (
-                f"\n  WARNING: clustered -- {self.n_trades:,} trades over only "
-                f"{self.n_symbols} symbols, top symbol {self.top_symbol_share:.0%}. "
-                "t-stat and DSR assume independence; treat as unreliable."
+                f"\n  clustered: {self.n_trades:,} trades over {self.n_symbols} "
+                f"symbols, top symbol {self.top_symbol_share:.0%}"
                 if self.clustered else ""
+            )
+            + (
+                f"\n  dependence: rho {self.rho:.3f}, SE inflated "
+                f"{self.se_inflation:.2f}x, effective n {self.n_effective:,.0f} "
+                f"({self.n_effective / max(self.n_trades, 1):.0%} of nominal)"
+                f"\n  t-stat clustered {self.t_stat_clustered:+.2f}  "
+                f"(naive {self.t_stat:+.2f})"
+                if self.n_effective else
+                "\n  dependence: every observation fell in a single cluster; "
+                "no standard error can be estimated and no evidence is carried."
+                if self.n_trades >= 30 else ""
+            )
+            + (
+                "\n  WARNING: too few clusters for the correction itself to be "
+                "reliable. The econometric answer here is a wild cluster "
+                "bootstrap, which is not implemented."
+                if not self.clusters_sufficient and self.n_trades >= 30 else ""
             )
         )
 
@@ -256,6 +306,7 @@ def run(
     coverage = {c.value: 0 for c in Coverage}
     returns: list[float] = []
     symbols: list[str] = []
+    entry_days: list[object] = []
     cost_per_trade: list[float] = []
     for payload, label in pairs:
         coverage[label.coverage.value] += 1
@@ -264,6 +315,10 @@ def run(
         if selector(payload, label):
             returns.append(label.returns[horizon])
             symbols.append(label.symbol)
+            # Entry day, not event day: two filings entering on the same session
+            # share that session's market move regardless of when they were
+            # disclosed. That shared move is the cross-sectional dependence.
+            entry_days.append(label.entry_day)
             if costs is not None:
                 # Charged per trade rather than as one average, because cost
                 # varies by an order of magnitude across this universe -- a
@@ -289,6 +344,12 @@ def run(
     n_symbols = len(counts)
     top_share = (counts.most_common(1)[0][1] / len(returns)) if counts else 0.0
 
+    from .clustering import diagnose
+
+    # Dependence structure first: it changes both the t-statistic and the
+    # observation count the DSR is entitled to assume.
+    cluster = diagnose(returns, symbols, entry_days)
+
     mean = statistics.fmean(returns)
     mean_w = statistics.fmean(winsorise(returns))
     costed = bool(cost_per_trade) and len(cost_per_trade) == len(returns)
@@ -303,14 +364,23 @@ def run(
     skew, kurt = _moments(returns)
     sharpe_trade = mean / sd if sd > 0 else 0.0
     t_stat = sharpe_trade * math.sqrt(n)
+    # The statistic to actually read. Dependence inflates the naive one; on
+    # simulated noise carrying our structure it rejected a true null 57% of the
+    # time against a nominal 5%, and the clustered version brought that to 6.7%.
+    t_clustered = mean / cluster.se_clustered if cluster.se_clustered > 0 else 0.0
 
     # Annualisation is presentational only. Without a supplied trade frequency,
     # assume each position is held `horizon` sessions and capital recycles.
     per_year = trades_per_year or (TRADING_DAYS / max(horizon, 1))
     sharpe_annual = sharpe_trade * math.sqrt(per_year)
 
+    # The DSR is handed the EFFECTIVE observation count, not the trade count.
+    # It assumes independent draws, and passing a number that asserts far more
+    # independence than the data has is the same error as the naive t-stat --
+    # except the DSR is what decides significance here, so it matters more.
     verdict = assess(
-        registry, observed_sharpe_annual=sharpe_annual, n_obs=n,
+        registry, observed_sharpe_annual=sharpe_annual,
+        n_obs=max(int(cluster.n_effective), 2),
         skew=skew, kurtosis=kurt, periods_per_year=int(per_year) or 1,
     )
 
@@ -332,6 +402,9 @@ def run(
         significant=bool(verdict["significant"]),
         n_symbols=n_symbols, top_symbol_share=top_share,
         mean_return_winsorised=mean_w,
+        t_stat_clustered=t_clustered, n_effective=cluster.n_effective,
+        rho=cluster.rho, se_inflation=cluster.inflation,
+        clusters_sufficient=cluster.enough_clusters,
         mean_return_net=mean_net, median_cost_bps=median_cost_bps, costed=costed,
         coverage=coverage,
     )

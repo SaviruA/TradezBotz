@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -408,3 +408,81 @@ def test_costs_can_vary_by_symbol(reg):
               costs=lambda lab: costs[lab.symbol])
 
     assert res.mean_return_net == pytest.approx(0.05 - (0.0005 + 0.03) / 2)
+
+
+# --- dependence corrections -----------------------------------------------------
+
+def test_a_clustered_sample_gets_a_smaller_t_stat(reg):
+    """The whole point: repeat filings on one symbol are not independent draws,
+    and the naive t-stat treats them as if they were."""
+    rng = random.Random(3)
+    payloads = [{"k": 1}] * 200
+    # Real variance, or there is no standard error for dependence to inflate.
+    labels = [label(rng.gauss(0.03, 0.02)) for _ in range(200)]
+    for lab in labels:
+        object.__setattr__(lab, "symbol", "RCG")   # all one symbol, all one day
+
+    res = run(labels, payloads, hypothesis="clustered", rationale="r", registry=reg)
+
+    assert abs(res.t_stat_clustered) < abs(res.t_stat)
+    assert res.n_effective < res.n_trades
+    assert res.se_inflation > 1.0
+
+
+def test_a_diverse_sample_is_barely_touched(reg):
+    """A correction that always shrinks the statistic is a penalty, not a
+    correction. On independent draws it must be close to a no-op."""
+    rng = random.Random(5)
+    payloads = [{"k": 1}] * 300
+    labels = []
+    for i in range(300):
+        lab = label(rng.gauss(0.01, 0.03))
+        object.__setattr__(lab, "symbol", f"SYM{i}")
+        object.__setattr__(lab, "entry_day", date(2025, 1, 1) + timedelta(days=i))
+        labels.append(lab)
+
+    res = run(labels, payloads, hypothesis="diverse", rationale="r", registry=reg)
+
+    assert res.se_inflation == pytest.approx(1.0, abs=0.2)
+    assert res.n_effective / res.n_trades > 0.6
+
+
+def test_the_dsr_is_given_effective_not_nominal_n(reg):
+    """The modification that matters most. The DSR decides significance and it
+    assumes independent draws; handing it the raw trade count asserts far more
+    independence than the data has."""
+    rng = random.Random(4)
+    payloads = [{"k": 1}] * 200
+    labels = [label(rng.gauss(0.03, 0.02)) for _ in range(200)]
+    for lab in labels:
+        object.__setattr__(lab, "symbol", "ONE")
+
+    res = run(labels, payloads, hypothesis="dsr", rationale="r", registry=reg)
+
+    assert res.n_effective < res.n_trades
+    assert reg.get(res.trial_id).n_obs <= res.n_trades
+
+
+def test_dependence_severe_flags_a_collapsed_sample(reg):
+    rng = random.Random(6)
+    payloads = [{"k": 1}] * 200
+    labels = [label(rng.gauss(0.03, 0.02)) for _ in range(200)]
+    for lab in labels:
+        object.__setattr__(lab, "symbol", "ONE")
+
+    res = run(labels, payloads, hypothesis="severe", rationale="r", registry=reg)
+
+    assert res.dependence_severe is True
+    assert "dependence" in res.summary()
+
+
+def test_too_few_clusters_is_surfaced(reg):
+    payloads = [{"k": 1}] * 60
+    labels = [label(0.02) for _ in range(60)]
+    for i, lab in enumerate(labels):
+        object.__setattr__(lab, "symbol", f"S{i % 3}")
+
+    res = run(labels, payloads, hypothesis="few", rationale="r", registry=reg)
+
+    assert res.clusters_sufficient is False
+    assert "wild cluster bootstrap" in res.summary()
