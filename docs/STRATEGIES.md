@@ -99,6 +99,69 @@ certainly untradeable whatever the signal says. A 5-day strategy must clear
 ~0.93% per trade at the median name just to break even, against a published
 microcap insider CAR of ~6.3%.
 
+## Fundamentals, from SEC XBRL
+
+A signal family orthogonal to everything above, which is all price- and
+event-driven. Sourced from `data.sec.gov/api/xbrl`, not from a data vendor:
+**every observation carries a `filed` date**, which is point-in-time correctness
+for free and structurally the same guarantee as our own `observed_at`.
+
+Verified available: 528 us-gaap concepts for XELB (a microcap), with GrossProfit
+at 140 observations and OperatingIncomeLoss at 168. The frames endpoint returns
+2,095 companies for one concept in one quarter.
+
+| hypothesis | status | notes |
+| --- | --- | --- |
+| **Non-preplanned insider selling** | planned | Form 4 `aff10b5One` = false. The sell-side mirror of the routine/opportunistic classifier. **Coverage constraint below.** |
+| Margin compression (gross + operating) | planned | 4 consecutive quarters of decline; GrossProfit / OperatingIncomeLoss / Revenues |
+| Price/Sales, Price/FCF, EV/EBITDA | planned | XBRL plus our own prices; no vendor needed |
+| YoY revenue growth | planned | conditioner rather than a signal on its own |
+| Value/Growth score (P/S ÷ growth) | planned | a sales-based PEG variant; low = most growth per dollar of valuation |
+| Customer concentration > 25% | blocked | 10-K narrative text, not tagged in XBRL |
+| GAAP vs non-GAAP gap, guidance cuts | blocked | narrative text |
+
+### The 10b5-1 coverage constraint
+
+Measured directly, not assumed. The structured `<aff10b5One>` element arrives
+with the December 2022 Form 4 amendment:
+
+    2018-06-14   structured 0/15    footnote mentions 2
+    2021-06-15   structured 0/15    footnote mentions 1
+    2023-06-15   structured 15/15   footnote mentions 0
+    2026-08-26   structured 60/60   -- 9 true (15%), 51 false (85%)
+
+Before 2023 the flag is mostly **absent**, not merely unstructured: only one or
+two filings in fifteen mention 10b5-1 at all, in free-text footnotes. So this
+signal covers roughly the most recent third of our ten-year window, and any
+pre-2023 event must be labelled UNKNOWN rather than assumed discretionary --
+the same discipline the routine/opportunistic classifier already applies.
+
+The base rate where it does exist is clean and usable: 15% preplanned, 85%
+discretionary.
+
+## Where LLM research may and may not be used
+
+Prompt-driven company research (deep dive, peer comparison, bear case) is
+**forbidden as a backtest input** and permitted only forward-only, at execution
+time, on a name the pipeline has already flagged.
+
+The reason is the one recorded in `TOOLING.md`: a model asked to assess a 2019
+company already knows how 2019 turned out. That leakage lives in the weights and
+defeats `observed_at`, the trial registry, the DSR and the locked holdout at
+once. There is no version of it that survives a historical evaluation.
+
+Forward-only use is legitimate, with one honest cost: a discretionary veto
+cannot be backtested, so it is an **unmeasured intervention** with unknown sign.
+Every override should be logged so it can be assessed later rather than
+disappearing into the result.
+
+A related trap in the prompts as written: they suggest sourcing fundamentals
+from Yahoo Finance and Macrotrends. Those display **restated** figures. A
+company's 2019 revenue as shown today may have been restated in 2021, so using
+it to evaluate a 2019 decision is lookahead by the back door. XBRL's `filed`
+field is exactly what prevents that, and is why the table above sources from the
+primary filing rather than a display layer.
+
 ## Required pairings
 
 The user requirement is explicit: test individually **and** paired. The engine
@@ -120,6 +183,11 @@ only trial budget.
   run an ATM is a different trade from one that is not
 - **insider buy x 8-K item 1.01** -- insiders are documented to buy ahead of new
   customer and supplier agreements, which is what 1.01 discloses
+- **insider buy x NO recent non-preplanned insider selling** -- an officer
+  buying while another is discretionarily selling is a different signal from a
+  clean one, and both sides come from the same form we already parse
+- **insider buy x margin compression** -- the bear-case pairing: does insider
+  conviction survive deteriorating fundamentals, or is it the stronger tell?
 - Bollinger squeeze × Donchian breakout (compression then expansion)
 
 ---
