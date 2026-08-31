@@ -59,6 +59,7 @@ listed; crypto-only and broker-API entries were skipped.
 | Heikin-Ashi | planned | smoothed candles; a trend filter with a different lag profile from an MA |
 | Dual Thrust | planned | open-range breakout with a volatility-scaled band |
 | Parabolic SAR | planned | trailing stop rule; more interesting as an *exit* than an entry, and we have no exit rules yet |
+| **Darvas Box** | planned | event-anchored box from a new 12-month high; see the caveat below |
 | Awesome Oscillator | planned | momentum via 5/34 median-price MAs; overlaps MACD, so worth testing as a substitute rather than an addition |
 
 **Two tools rather than strategies**, both worth stealing:
@@ -169,6 +170,38 @@ Consequences, all enforced in code:
 Affordability is why exact classification is realistic at all: insider buying
 concentrates in small caps, and a full session of those is 127-1,227 prints. A
 mega-cap session is millions and is not attempted.
+
+## The Darvas Box caveat
+
+Bulkowski's test -- 104 ETFs and 557 stocks, 2001-2010, across two bulls and two
+bears -- found **average gains near 0% on daily data** for both ETFs and stocks.
+The only configuration that worked was weekly bars with a 52-week lookback and
+~297-day holds: 49% win rate, +10.5% per trade.
+
+Our horizons are (0, 1, 5, 20) on daily bars, which is the configuration that
+measured zero. At a 93bps median round trip a 0% gross strategy is firmly
+negative, so **testing it standalone at current horizons is close to a known
+answer.** Bulkowski's diagnosed failure mode is that on daily scales the system
+"opens a trade just before price peaks".
+
+Most of the rule set already exists: a new 12-month high is `near_high`, the
+breakout is `donchian_breakout`, the volume condition is `relative_volume`, and
+the fall-back-into-the-box exit is exactly `swept_high`. Three things are
+genuinely new -- the box is anchored to an *event* rather than a rolling window,
+it requires 3-day confirmation, and it pyramids into higher boxes (we have no
+position sizing at all).
+
+**What makes it worth a trial anyway** is the half of Darvas's method that gets
+forgotten. He called himself a *techno-fundamentalist* and filtered to companies
+with new products and earnings growth before he looked at a single box. We have a
+machine-readable, point-in-time version of that filter now: 8-K item 2.02
+(results) and 1.01 (material agreement), plus insider buying. Box breakout
+conditioned on those is a coherent reconstruction of the actual method rather
+than of the indicator.
+
+**Prerequisite:** a longer horizon. The working version held ~10 months and
+nothing in `DEFAULT_HORIZONS` reaches past 20 days. This only became testable at
+all after the labelling window widened from 2 years to 10.
 
 ## The liquidity sweep caveat
 
