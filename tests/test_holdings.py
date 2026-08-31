@@ -208,3 +208,146 @@ def test_persistence_survives_no_overlap():
 
     assert out["shared_filers"] == 0
     assert out["rank_correlation"] == 0.0
+
+
+# --- House PTR parsing ----------------------------------------------------------
+
+from tradezbotz.research.holdings import (  # noqa: E402
+    CongressTrade, HouseIndexRow, parse_amount, parse_house_ptr, _reflow,
+)
+
+ROW = HouseIndexRow(last="Allen", first="Richard W.", filing_type="P",
+                    state_district="GA12", year="2025",
+                    filed=date(2025, 1, 16), doc_id="20026537")
+
+# Exactly how the extractor emits it: ticker and type on separate lines, and the
+# amount bracket wrapped mid-range.
+REAL_SHAPE = """Name: Hon. Richard W. Allen
+SP Rollins, Inc. Common Stock (ROL)
+[ST]
+P 12/12/2024 01/08/2025 $15,001 -
+$50,000
+"""
+
+
+def test_wrapped_records_are_reflowed_before_parsing():
+    """Both live defects in one fixture: without reflow the ticker is missed and
+    a $15,001-$50,000 trade is recorded as $15,001-$15,001."""
+    trades = parse_house_ptr(REAL_SHAPE, ROW)
+
+    assert len(trades) == 1
+    t = trades[0]
+    assert t.symbol == "ROL"
+    assert (t.amount_low, t.amount_high) == (15001.0, 50000.0)
+
+
+def test_ownership_is_extracted():
+    """A member's own account is a stronger signal than a spouse's."""
+    assert parse_house_ptr(REAL_SHAPE, ROW)[0].owner == "spouse"
+
+
+def test_self_is_the_default_owner():
+    text = "Apple Inc (AAPL)\n[ST]\nP 01/02/2025 01/10/2025 $1,001 - $15,000\n"
+
+    assert parse_house_ptr(text, ROW)[0].owner == "self"
+
+
+def test_treasuries_yield_no_ticker_rather_than_a_wrong_one():
+    """Government securities carry a CUSIP, not a symbol. Half of a typical
+    filing is these, and inventing a ticker would be worse than omitting one."""
+    text = "US T NOTE 12/15/26 (91282CJP7)\n[GS]\nP 12/03/2024 12/20/2024 $100,001 - $250,000\n"
+
+    t = parse_house_ptr(text, ROW)[0]
+
+    assert t.symbol is None
+    assert t.asset_type == "GS"
+
+
+def test_purchases_and_sales_are_distinguished():
+    buy = "X Corp (XXX)\n[ST]\nP 01/02/2025 01/10/2025 $1,001 - $15,000\n"
+    sell = "X Corp (XXX)\n[ST]\nS 01/02/2025 01/10/2025 $1,001 - $15,000\n"
+
+    assert parse_house_ptr(buy, ROW)[0].is_purchase is True
+    assert parse_house_ptr(sell, ROW)[0].is_purchase is False
+
+
+def test_a_partial_sale_is_still_a_sale():
+    text = "X Corp (XXX)\n[ST]\nS (partial) 01/02/2025 01/10/2025 $1,001 - $15,000\n"
+
+    trades = parse_house_ptr(text, ROW)
+
+    assert len(trades) == 1 and trades[0].code == "S"
+
+
+def test_unparseable_lines_are_dropped_not_guessed():
+    """These are disclosures. A wrong ticker is worse than a missing row."""
+    assert parse_house_ptr("garbage\nmore garbage\n", ROW) == []
+
+
+def test_amount_is_a_bracket_never_a_midpoint():
+    """The filing discloses a range; collapsing it to one number would invent
+    precision that was never disclosed."""
+    assert parse_amount("$1,001 - $15,000") == (1001.0, 15000.0)
+    assert parse_amount("$15,000") == (15000.0, 15000.0)
+    assert parse_amount("no numbers here") == (0.0, 0.0)
+
+
+def test_reflow_joins_only_continuations():
+    out = _reflow(["P 01/02/2025 01/10/2025 $15,001 -", "$50,000", "Next Asset (AAA)"])
+
+    assert out == ["P 01/02/2025 01/10/2025 $15,001 - $50,000", "Next Asset (AAA)"]
+
+
+# --- the point-in-time rule for congress -------------------------------------------
+
+def test_observed_at_is_the_filing_date_not_the_trade_date():
+    """The transaction is up to 45 days older than the disclosure. Using the
+    trade date would be lookahead of exactly the kind the STOCK Act lag creates."""
+    t = parse_house_ptr(REAL_SHAPE, ROW)[0]
+    ev = t.to_event()
+
+    assert ev.observed_at.date() == date(2025, 1, 16), "filing date"
+    assert ev.occurred_at.date() == date(2024, 12, 12), "trade date"
+    assert ev.occurred_at < ev.observed_at
+
+
+def test_disclosure_lag_is_measured():
+    assert parse_house_ptr(REAL_SHAPE, ROW)[0].disclosure_lag_days == 35
+
+
+def test_congress_event_ids_do_not_collide():
+    """One filing can disclose several trades in the same name on different
+    dates, and two members can file the same ticker the same day."""
+    a = CongressTrade("D1", "M", "GA12", "AAA", "A", "P", "self",
+                      date(2025, 1, 2), date(2025, 2, 1), 1.0, 2.0).to_event()
+    b = CongressTrade("D1", "M", "GA12", "AAA", "A", "P", "self",
+                      date(2025, 1, 3), date(2025, 2, 1), 1.0, 2.0).to_event()
+    c = CongressTrade("D2", "M", "GA12", "AAA", "A", "P", "self",
+                      date(2025, 1, 2), date(2025, 2, 1), 1.0, 2.0).to_event()
+
+    assert len({a.external_id, b.external_id, c.external_id}) == 3
+
+
+def test_only_ptr_rows_carry_transactions():
+    annual = HouseIndexRow("X", "Y", "D", "GA12", "2025", date(2025, 1, 1), "1")
+    ptr = HouseIndexRow("X", "Y", "P", "GA12", "2025", date(2025, 1, 1), "2")
+
+    assert annual.is_ptr is False
+    assert ptr.is_ptr is True
+
+
+def test_a_trade_dated_after_its_own_disclosure_is_dropped():
+    """Real filings contain these: a live 2025 filing disclosed a trade dated
+    2026-12-26, because members type the dates by hand. The event store rejects
+    such a row outright, so one typo would otherwise end a whole ingest -- and
+    a date known to be wrong cannot be used to place an entry anyway."""
+    text = "X Corp (XXX)\n[ST]\nP 12/26/2026 12/28/2026 $1,001 - $15,000\n"
+
+    assert parse_house_ptr(text, ROW) == []
+
+
+def test_a_normal_backdated_trade_still_parses():
+    """The guard must reject only the impossible direction."""
+    text = "X Corp (XXX)\n[ST]\nP 12/12/2024 01/08/2025 $1,001 - $15,000\n"
+
+    assert len(parse_house_ptr(text, ROW)) == 1

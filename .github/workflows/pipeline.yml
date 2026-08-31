@@ -132,6 +132,16 @@ jobs:
         run: |
           python -m tradezbotz ingest-filings --days 400 --max-minutes 25
 
+      # 13F holdings, 13D/G stakes, and House congressional trades. Operating
+      # companies file 13F too -- NVIDIA has 11 on file -- so "NVIDIA took a
+      # stake in X" arrives here rather than from a press cycle.
+      - name: Ingest holdings and congressional trades
+        continue-on-error: true
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python -m tradezbotz ingest-holdings --days 120 --years 2 --max-minutes 20
+
       # ApeWisdom serves only a current snapshot -- no history exists at any
       # price. Sentiment can therefore never be backfilled, only accumulated,
       # so every run that skips this loses a day permanently. Cheap (~20s) and
@@ -184,7 +194,7 @@ jobs:
           ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
         run: |
           python -m tradezbotz backfill-intraday \
-            --days 180 --minutes 30 --batch 50
+            --days 180 --minutes 15 --batch 50
 
       - name: Status
         run: python -m tradezbotz status

@@ -793,6 +793,107 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest_holdings(args: argparse.Namespace) -> int:
+    """Ingest 13F holdings, 13D/G stakes, and House congressional trades.
+
+    Three disclosure regimes with different lags: 13F is 45 days stale by
+    construction, 13D is five business days, and House PTRs run 14-45 days.
+    Each records its own lag on every event so a strategy has to reason about
+    staleness rather than forget it.
+    """
+    from .lock import SingleInstance
+    from .research.edgar import EdgarClient
+    from .research.eventstore import EventStore
+    from .research.holdings import (
+        FORMS_13DG, FORMS_13F, HOUSE_BULK, extract_pdf_text, ingest_day,
+        parse_house_index, parse_house_ptr,
+    )
+
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        store = EventStore(DEFAULT_STATE / EVENTS_DB)
+        deadline = time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
+        total = 0
+
+        if args.kind in ("both", "sec"):
+            client = EdgarClient()
+            client.verify_access()
+            end = args.end or date.today()
+            start = args.start or (end - timedelta(days=args.days))
+            days = [start + timedelta(days=i)
+                    for i in range((end - start).days + 1)
+                    if (start + timedelta(days=i)).weekday() < 5]
+            days.reverse()
+            forms = FORMS_13F + FORMS_13DG
+            for day in days:
+                if deadline and time.monotonic() > deadline:
+                    print("time budget reached; remaining days left for next run",
+                          flush=True)
+                    break
+                marker = "sec_holdings"
+                if not args.force and store.day_ingested(marker, day):
+                    continue
+                events = []
+                for parsed in ingest_day(client, day, forms):
+                    try:
+                        made = (list(parsed.to_events())
+                                if hasattr(parsed, "to_events") else [parsed.to_event()])
+                        events.extend(made)
+                    except Exception:  # noqa: BLE001
+                        continue
+                new = store.record_many(events)
+                if events:
+                    store.mark_day_ingested(marker, day, len(events))
+                total += new
+                if events:
+                    print(f"{day}  13F/13D events {len(events):6d}  new {new:6d}",
+                          flush=True)
+
+        if args.kind in ("both", "house"):
+            import requests
+            from .research.edgar import _user_agent
+            ua = {"User-Agent": _user_agent()}
+            for year in range(date.today().year, date.today().year - args.years, -1):
+                if deadline and time.monotonic() > deadline:
+                    break
+                try:
+                    blob = requests.get(HOUSE_BULK.format(year=year),
+                                        headers=ua, timeout=120)
+                    if blob.status_code != 200:
+                        continue
+                    rows = [r for r in parse_house_index(blob.content) if r.is_ptr]
+                except Exception as exc:  # noqa: BLE001
+                    print(f"{year}: House index unavailable ({exc})", flush=True)
+                    continue
+                print(f"{year}: {len(rows)} periodic transaction reports", flush=True)
+                for row in rows:
+                    if deadline and time.monotonic() > deadline:
+                        break
+                    marker = f"house_{row.doc_id}"
+                    if not args.force and store.day_ingested(marker, row.filed):
+                        continue
+                    try:
+                        pdf = requests.get(row.pdf_url, headers=ua, timeout=60)
+                        if pdf.status_code != 200:
+                            continue
+                        trades = parse_house_ptr(extract_pdf_text(pdf.content), row)
+                    except Exception:  # noqa: BLE001
+                        # One unreadable PDF must not end the run; the doc stays
+                        # unmarked so a later invocation retries it.
+                        continue
+                    events = [t.to_event() for t in trades]
+                    total += store.record_many(events)
+                    store.mark_day_ingested(marker, row.filed, len(events))
+
+        print(f"\ntotal new events: {total}")
+        print(f"event store total: {store.count()}")
+        store.close()
+        return 0
+    finally:
+        lock.release()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradezbotz")
     sub = p.add_subparsers(dest="command", required=True)
@@ -912,6 +1013,19 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--file", default="watchlist.yml",
                     help="watchlist location (versioned in the repo by design)")
     wt.set_defaults(func=cmd_watch)
+
+    hld = sub.add_parser("ingest-holdings",
+                         help="13F holdings, 13D/G stakes, House congress trades")
+    hld.add_argument("--kind", choices=("both", "sec", "house"), default="both")
+    hld.add_argument("--days", type=int, default=120,
+                     help="how far back to scan EDGAR daily indexes")
+    hld.add_argument("--years", type=int, default=2,
+                     help="how many years of House bulk indexes to walk")
+    hld.add_argument("--start", type=date.fromisoformat)
+    hld.add_argument("--end", type=date.fromisoformat)
+    hld.add_argument("--max-minutes", type=int, default=0)
+    hld.add_argument("--force", action="store_true")
+    hld.set_defaults(func=cmd_ingest_holdings)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)

@@ -444,3 +444,285 @@ def ingest_day(client: EdgarClient, day: date,
             continue
         if parsed is not None:
             yield parsed
+
+
+# --- House periodic transaction reports ------------------------------------------
+#
+# The bulk zip is an INDEX, not the data: it lists who filed what and when, and
+# the transactions live in per-filing PDFs. Those are generated rather than
+# scanned so the text extracts cleanly -- but it is still text extraction, and
+# the parser drops a line it cannot read rather than guessing at it. These are
+# disclosures; a wrong ticker is worse than a missing one.
+#
+# Filing type P in the index is the periodic transaction report. The rest are
+# annual reports, candidate filings, amendments and terminations, none of which
+# carry transactions. In 2025 that was 515 PTRs out of 2,913 index rows.
+
+HOUSE_PTR_PDF = ("https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/"
+                 "{year}/{doc_id}.pdf")
+
+HOUSE_PTR_TYPE = "P"
+
+#: Ownership codes. Who holds the asset changes what the trade means: a
+#: member's own account is a stronger signal than a dependent child's.
+OWNER_CODES = {"SP": "spouse", "DC": "dependent_child", "JT": "joint"}
+
+_TXN_RE = re.compile(
+    r"^(?P<code>P|S|E)(?:\s*\(partial\))?\s+"
+    r"(?P<txn>\d{2}/\d{2}/\d{4})\s+(?P<notified>\d{2}/\d{2}/\d{4})\s+"
+    r"(?P<amount>\$[\d,]+(?:\s*-\s*\$?[\d,]+)?)",
+    re.IGNORECASE)
+
+#: Ticker and asset-type code. Matched against *reflowed* text, never raw lines:
+#: the PDF extractor wraps mid-record, and a real filing reads
+#:
+#:     SP Rollins, Inc. Common Stock (ROL)
+#:     [ST]
+#:     P 12/12/2024 01/08/2025 $15,001 -
+#:     $50,000
+#:
+#: so requiring `(ROL) [ST]` on one physical line finds nothing, and reading the
+#: amount from one line yields $15,001-$15,001 for a $15,001-$50,000 trade. Both
+#: were live defects caught against real filings, which is why `_reflow` exists
+#: rather than the parser working line by line.
+_TICKER_RE = re.compile(r"\(([A-Z][A-Z.\-]{0,6})\)\s*\[(\w{2})\]")
+_OWNER_RE = re.compile(r"^(SP|DC|JT)\s+")
+
+#: The asset-type code, matched independently of the ticker.
+#:
+#: Separate because they do not always co-occur: a Treasury reads
+#: `(91282CJP7) [GS]`, whose parenthesised value is a CUSIP and correctly fails
+#: the ticker pattern -- but the `[GS]` is still worth keeping. Roughly half a
+#: typical filing is government securities and funds, and "no ticker" and "not
+#: an equity" are different facts. Recording the type lets those be excluded
+#: deliberately rather than by absence.
+_ASSET_TYPE_RE = re.compile(r"\[(\w{2})\]")
+
+#: A continuation line: the tail of a wrapped amount, or a bare asset-type code.
+_CONTINUATION_RE = re.compile(r"^(?:\$[\d,]+|\[\w{2}\])\s*$")
+
+
+def _reflow(lines: list[str]) -> list[str]:
+    """Join continuation fragments back onto the line they belong to.
+
+    The PDF text extractor breaks records at the column boundaries of the
+    original table, so a single disclosed transaction arrives as two to four
+    physical lines. Reflowing first is what lets the rest of the parser stay
+    simple, and it is the difference between reading a $50,000 sale correctly
+    and recording it as $15,001.
+    """
+    out: list[str] = []
+    for line in lines:
+        if out and _CONTINUATION_RE.match(line):
+            out[-1] = f"{out[-1]} {line}".strip()
+        else:
+            out.append(line)
+    return out
+
+
+@dataclass(frozen=True)
+class CongressTrade:
+    """One disclosed transaction from a House periodic transaction report."""
+
+    doc_id: str
+    member: str
+    state_district: str
+    symbol: str | None
+    asset: str
+    code: str             # P purchase, S sale, E exchange
+    owner: str            # self | spouse | dependent_child | joint
+    transaction_date: date
+    #: When the filing became public. **The only defensible observed_at.** The
+    #: transaction date is up to 45 days earlier and the notification date is
+    #: when the member learned of it -- neither was knowable to us, and using
+    #: either would be lookahead of exactly the kind the STOCK Act's reporting
+    #: lag creates.
+    filed: date
+    #: Disclosed as a bracket, never a number. Storing a midpoint as though it
+    #: were the size would invent precision the filing does not contain.
+    amount_low: float
+    amount_high: float
+    asset_type: str = ""
+
+    @property
+    def is_purchase(self) -> bool:
+        return self.code.upper() == "P"
+
+    @property
+    def disclosure_lag_days(self) -> int:
+        return (self.filed - self.transaction_date).days
+
+    def to_event(self) -> Event:
+        return Event(
+            source=SOURCE_HOUSE,
+            kind=KIND_CONGRESS,
+            external_id=f"{self.doc_id}:{self.symbol or self.asset[:40]}:"
+                        f"{self.transaction_date.isoformat()}:{self.code}",
+            observed_at=datetime.combine(self.filed, datetime.min.time(),
+                                         tzinfo=timezone.utc),
+            occurred_at=datetime.combine(self.transaction_date,
+                                         datetime.min.time(), tzinfo=timezone.utc),
+            payload={
+                "member": self.member,
+                "state_district": self.state_district,
+                "symbol": self.symbol,
+                "asset": self.asset,
+                "code": self.code,
+                "is_purchase": self.is_purchase,
+                "owner": self.owner,
+                "amount_low": self.amount_low,
+                "amount_high": self.amount_high,
+                "disclosure_lag_days": self.disclosure_lag_days,
+                "asset_type": self.asset_type,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class HouseIndexRow:
+    last: str
+    first: str
+    filing_type: str
+    state_district: str
+    year: str
+    filed: date
+    doc_id: str
+
+    @property
+    def is_ptr(self) -> bool:
+        return self.filing_type.upper() == HOUSE_PTR_TYPE
+
+    @property
+    def member(self) -> str:
+        return f"{self.first} {self.last}".strip()
+
+    @property
+    def pdf_url(self) -> str:
+        return HOUSE_PTR_PDF.format(year=self.year, doc_id=self.doc_id)
+
+
+def parse_house_index(zip_bytes: bytes) -> list[HouseIndexRow]:
+    """Read the year's filing index out of the bulk zip.
+
+    utf-8-sig because the file carries a BOM. A plain utf-8 read leaves it glued
+    to the first column name, which breaks the header mapping silently rather
+    than raising -- every row would then come back with an empty Prefix key and
+    no error to show for it.
+    """
+    z = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    txt = next((n for n in z.namelist() if n.lower().endswith(".txt")), None)
+    if txt is None:
+        raise HoldingsError("no index .txt in the House bulk zip")
+    lines = z.read(txt).decode("utf-8-sig", errors="replace").splitlines()
+    if not lines:
+        return []
+    header = [h.strip() for h in lines[0].split("\t")]
+    out: list[HouseIndexRow] = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        row = dict(zip(header, line.split("\t")))
+        try:
+            filed = datetime.strptime((row.get("FilingDate") or "").strip(),
+                                      "%m/%d/%Y").date()
+        except ValueError:
+            continue
+        out.append(HouseIndexRow(
+            last=(row.get("Last") or "").strip(),
+            first=(row.get("First") or "").strip(),
+            filing_type=(row.get("FilingType") or "").strip(),
+            state_district=(row.get("StateDst") or "").strip(),
+            year=(row.get("Year") or "").strip(),
+            filed=filed,
+            doc_id=(row.get("DocID") or "").strip(),
+        ))
+    return out
+
+
+def parse_amount(text: str) -> tuple[float, float]:
+    """Turn a disclosed bracket into its bounds.
+
+    A single figure means an exact amount, so both bounds are that figure.
+    Returning a range rather than a midpoint is deliberate: the filing discloses
+    a bracket, and collapsing it to one number manufactures precision that was
+    never disclosed.
+    """
+    nums = [float(n.replace(",", "")) for n in re.findall(r"[\d,]+", text)]
+    if not nums:
+        return 0.0, 0.0
+    return (nums[0], nums[-1]) if len(nums) > 1 else (nums[0], nums[0])
+
+
+def parse_house_ptr(text: str, row: HouseIndexRow) -> list[CongressTrade]:
+    """Extract transactions from an extracted PTR document.
+
+    The generated PDFs use a consistent two-part shape: an asset line carrying
+    `(TICKER) [TYPE]`, then a line with the transaction code, both dates and the
+    amount bracket. The asset name wraps often enough that the ticker can sit
+    one to three lines above, so the search walks back rather than assuming the
+    immediately preceding line.
+    """
+    lines = _reflow([ln.strip() for ln in text.splitlines() if ln.strip()])
+    out: list[CongressTrade] = []
+    for i, line in enumerate(lines):
+        m = _TXN_RE.match(line)
+        if not m:
+            continue
+        symbol, asset, asset_type, owner = None, None, "", "self"
+        for back in range(1, 4):
+            if i - back < 0:
+                break
+            candidate = lines[i - back]
+            if asset is None:
+                asset = candidate
+            am = _ASSET_TYPE_RE.search(candidate)
+            if not am:
+                continue
+            # The asset-type marker anchors the description line; the ticker is
+            # optional on it, because a Treasury carries a CUSIP instead.
+            asset, asset_type = candidate, am.group(1)
+            tm = _TICKER_RE.search(candidate)
+            if tm:
+                symbol = tm.group(1)
+            om = _OWNER_RE.match(candidate)
+            if om:
+                owner = OWNER_CODES.get(om.group(1).upper(), "self")
+            break
+        try:
+            txn_date = datetime.strptime(m.group("txn"), "%m/%d/%Y").date()
+        except ValueError:
+            continue
+        # A transaction cannot postdate its own disclosure. Real filings contain
+        # dates that do -- a live 2025 filing disclosed a trade dated
+        # 2026-12-26 -- because members type these by hand. The event store
+        # rejects such a row outright, so catching it here keeps one typo from
+        # ending an ingest, and dropping it is right regardless: a date we know
+        # to be wrong cannot be used to place an entry.
+        if txn_date > row.filed:
+            continue
+        low, high = parse_amount(m.group("amount"))
+        out.append(CongressTrade(
+            doc_id=row.doc_id, member=row.member,
+            state_district=row.state_district,
+            symbol=symbol, asset=(asset or "").strip(),
+            code=m.group("code").upper(), owner=owner,
+            transaction_date=txn_date, filed=row.filed,
+            amount_low=low, amount_high=high, asset_type=asset_type,
+        ))
+    return out
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """Text from a generated PTR PDF.
+
+    pypdf is optional: only this path needs it, and the trades it produces are
+    stored once as events, so nothing downstream depends on the reader.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # pragma: no cover - environment
+        raise HoldingsError(
+            "House PTRs are PDFs. Install the reader:\n    pip install pypdf"
+        ) from exc
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
