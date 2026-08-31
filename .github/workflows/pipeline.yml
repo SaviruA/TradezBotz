@@ -40,6 +40,16 @@ jobs:
   run:
     runs-on: ubuntu-latest
     # Well under the 6h hard cap so the state save always gets to run.
+    #
+    # Step budgets must fit inside this alongside the two unbudgeted steps. They
+    # did not: 150 + 45 + 45 + 60 explicit, plus ~49 for a full backfill and ~10
+    # for crosscheck, came to ~359 against a 330 ceiling -- so the tail steps
+    # would have been cut. Filings and intraday trimmed to 25 and 30; both are
+    # checkpointed and resume, so the cost is slower catch-up, not lost work.
+    #
+    # The 150 for bulk archives is temporary pressure: it is only spent while
+    # the deeper 4895-day window loads its ~34 uncached quarters. Once cached,
+    # that step returns to seconds and the budget frees up again.
     timeout-minutes: 330
 
     steps:
@@ -120,7 +130,7 @@ jobs:
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          python -m tradezbotz ingest-filings --days 400 --max-minutes 45
+          python -m tradezbotz ingest-filings --days 400 --max-minutes 25
 
       # ApeWisdom serves only a current snapshot -- no history exists at any
       # price. Sentiment can therefore never be backfilled, only accumulated,
@@ -174,7 +184,7 @@ jobs:
           ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
         run: |
           python -m tradezbotz backfill-intraday \
-            --days 180 --minutes 60 --batch 50
+            --days 180 --minutes 30 --batch 50
 
       - name: Status
         run: python -m tradezbotz status

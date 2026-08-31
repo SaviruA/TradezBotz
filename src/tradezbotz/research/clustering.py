@@ -303,3 +303,39 @@ def diagnose(values: Sequence[float], symbols: Sequence[Hashable],
         se_naive=se_naive,
         se_clustered=se_clustered,
     )
+
+
+def rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman rank correlation. Returns 0.0 when either side has no spread.
+
+    Public because three call sites want it: the dependence diagnosis here,
+    the dividend-convergence test in `crosscheck`, and the ranking
+    persistence check in `holdings`. Rank rather than Pearson throughout,
+    because every one of those questions is about ordering rather than
+    magnitude, and each has outliers that would dominate a Pearson figure.
+    """
+    def ranks(vs: list[float]) -> list[float]:
+        order = sorted(range(len(vs)), key=lambda i: vs[i])
+        out = [0.0] * len(vs)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and vs[order[j + 1]] == vs[order[i]]:
+                j += 1
+            shared = (i + j) / 2.0
+            for k in range(i, j + 1):
+                out[order[k]] = shared
+            i = j + 1
+        return out
+
+    rx, ry = ranks(xs), ranks(ys)
+    n = len(rx)
+    if n < 3:
+        return 0.0
+    mx, my = statistics.fmean(rx), statistics.fmean(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = sum((a - mx) ** 2 for a in rx)
+    dy = sum((b - my) ** 2 for b in ry)
+    if dx <= 0 or dy <= 0:
+        return 0.0
+    return num / (dx * dy) ** 0.5

@@ -279,32 +279,10 @@ def _looks_like_dividend_adjustment(price_only: Series, candidate: Series) -> bo
 
 
 def _rank_correlation(xs: list[float], ys: list[float]) -> float:
-    """Spearman correlation. Returns 0.0 when either side has no spread."""
-    def ranks(vs: list[float]) -> list[float]:
-        order = sorted(range(len(vs)), key=lambda i: vs[i])
-        out = [0.0] * len(vs)
-        i = 0
-        while i < len(order):
-            j = i
-            while j + 1 < len(order) and vs[order[j + 1]] == vs[order[i]]:
-                j += 1
-            shared = (i + j) / 2.0
-            for k in range(i, j + 1):
-                out[order[k]] = shared
-            i = j + 1
-        return out
+    """Retained as a thin alias; the implementation moved to `clustering`."""
+    from .clustering import rank_correlation
+    return rank_correlation(xs, ys)
 
-    rx, ry = ranks(xs), ranks(ys)
-    n = len(rx)
-    if n < 3:
-        return 0.0
-    mx, my = statistics.fmean(rx), statistics.fmean(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    dx = sum((a - mx) ** 2 for a in rx)
-    dy = sum((b - my) ** 2 for b in ry)
-    if dx <= 0 or dy <= 0:
-        return 0.0
-    return num / (dx * dy) ** 0.5
 
 
 def adjudicate(primary: Series, secondary: Series, referee: Series) -> Adjudication:
