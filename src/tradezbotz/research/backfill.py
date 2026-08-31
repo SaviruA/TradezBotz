@@ -86,7 +86,7 @@ class Progress:
 class BackfillRunner:
     def __init__(
         self,
-        source: PriceSource,
+        source: PriceSource | None,
         checkpoint_path: str | Path,
         *,
         start: date,
@@ -178,6 +178,16 @@ class BackfillRunner:
         prog = self.progress()
         prog.started_at = time.monotonic()
 
+        if self.source is None:
+            # Queueing and progress reporting need no vendor at all, so the
+            # runner is constructible without credentials. Only fetching does,
+            # and refusing here rather than at construction is what lets
+            # `enqueue-symbols` and `status` run in a job that holds no price
+            # keys -- which is exactly how they broke in CI.
+            raise PriceError(
+                "this runner was built without a price source; it can queue and "
+                "report progress but not fetch."
+            )
         for symbol in symbols:
             if self._stop:
                 break

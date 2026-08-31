@@ -274,7 +274,7 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     symbols = symbols_from_events(labellable)
     store.close()
 
-    runner = _make_runner()
+    runner = _make_runner(need_source=False)
     added = runner.enqueue(symbols)
     print(
         f"{all_events} stored events; {len(labellable)} inside the "
@@ -287,7 +287,7 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
 
 
 def _make_runner(limit_per_minute: int | None = None, *, vendor: str = "alpaca",
-                 history_days: int | None = None):
+                 history_days: int | None = None, need_source: bool = True):
     """Build the price backfill.
 
     Alpaca by default. The reason is arithmetic: Massive's free tier allows 5
@@ -310,7 +310,13 @@ def _make_runner(limit_per_minute: int | None = None, *, vendor: str = "alpaca",
     )
 
     cache = PriceCache(DEFAULT_STATE / BARS_DB)
-    if vendor == "massive":
+    if not need_source:
+        # Queueing and status touch only the checkpoint. Constructing a vendor
+        # client would demand credentials those commands have no use for, which
+        # is what broke the pipeline after the switch to Alpaca.
+        source = None
+        window = history_days or ALPACA_HISTORY_DAYS
+    elif vendor == "massive":
         source = MassivePriceSource(
             cache=cache,
             per_minute=limit_per_minute or DEFAULT_REQUESTS_PER_MINUTE,
@@ -487,7 +493,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     ckpt = DEFAULT_STATE / CHECKPOINT_DB
     if ckpt.exists():
-        runner = _make_runner()
+        runner = _make_runner(need_source=False)
         print(f"backfill         : {runner.progress()}")
         print(f"parked failures  : {len(runner.failures())}")
         runner.close()

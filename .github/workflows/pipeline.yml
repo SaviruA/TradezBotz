@@ -120,11 +120,12 @@ jobs:
       - name: Snapshot Reddit sentiment
         run: python -m tradezbotz ingest-sentiment
 
+      # No vendor credentials: this reads the event store and writes the queue.
+      # It briefly required them by accident after the switch to Alpaca, and
+      # failed the whole run.
       - name: Queue newly seen symbols
-        env:
-          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
         # Open-market purchases are the signal and touch ~35% of the symbols
-        # all transaction codes do -- at 5 req/min that is 5h instead of 15h.
+        # all transaction codes do.
         run: python -m tradezbotz enqueue-symbols --buys-only
 
       # Alpaca, not Massive. Measured: 2,989 symbols/hour against Massive's 242,
@@ -166,8 +167,6 @@ jobs:
             --days 180 --minutes 60 --batch 50
 
       - name: Status
-        env:
-          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
         run: python -m tradezbotz status
 
       # `always()` so an interrupted or failed step still persists the work that
