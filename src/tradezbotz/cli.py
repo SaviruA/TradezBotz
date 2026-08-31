@@ -49,13 +49,20 @@ PRICE_WINDOW_DAYS = 3800  # ~2016 onward, matching ALPACA_HISTORY_DAYS
 #: still works and its ceiling is real; it is no longer the default.
 MASSIVE_WINDOW_DAYS = 730
 
-#: How much EDGAR history to ingest by default. Deliberately deeper than the
-#: price window: the routine/opportunistic classifier needs 3+ years of an
-#: insider's prior filings, so a 2-year ingest leaves every insider UNKNOWN and
-#: the filter carrying the actual edge never fires. EDGAR history is free and
-#: unbounded; the price window is not. These two limits are unrelated and must
-#: not be collapsed into one number.
-BASELINE_DAYS = 1825  # ~5 years
+#: How much EDGAR history to ingest. Deliberately deeper than the price window:
+#: the routine/opportunistic classifier needs 3+ years of an insider's *prior*
+#: filings, so an ingest that merely matches the labelling window leaves the
+#: earliest three years of events UNKNOWN and the filter carrying the actual
+#: edge never fires on them.
+#:
+#: Derived rather than hardcoded so the relationship cannot drift. It was 1825
+#: when the price window was 730; when the window moved to 3800 this had to move
+#: with it, and a second constant would have silently failed to.
+#:
+#: EDGAR history is free and unbounded, so the only cost of going deeper is
+#: ingest time -- roughly nine minutes per uncached quarter, once.
+BASELINE_LEAD_DAYS = 3 * 365  # MIN_YEARS_FOR_ROUTINE in research.classify
+BASELINE_DAYS = PRICE_WINDOW_DAYS + BASELINE_LEAD_DAYS  # ~13 years
 
 #: Alpaca's consolidated feed serves minute and daily bars back to 2016, against
 #: Massive's two years. Verified by probe, not read off a pricing page. This is

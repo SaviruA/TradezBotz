@@ -84,13 +84,23 @@ jobs:
       # Bulk archives first: one ~13 MB download carries a whole quarter, and
       # acceptance times come from ~4,200 issuer requests rather than ~27,000
       # filing fetches. Verified equal coverage against the per-filing path.
+      #
+      # 4895 days, not 1825. The labelling window moved to 3800 (2016 onward,
+      # matching Alpaca), and the routine/opportunistic classifier needs three
+      # years of an insider's PRIOR filings before it can call them routine --
+      # so the ingest must reach three years further back than the earliest
+      # labellable event, or that whole early window returns UNKNOWN and the
+      # filter carrying the edge never fires on it.
+      #
+      # ~53 quarters. Uncached ones cost roughly nine minutes each, so the next
+      # two or three runs do the work and every run after that takes seconds.
       - name: Ingest SEC bulk archives (baselines + labelling window)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
           python -m tradezbotz ingest-bulk \
             --timed \
-            --days 1825 \
+            --days 4895 \
             --before "$(date -u -d '1 day' +%Y-%m-%d)" \
             --max-minutes "${{ github.event.inputs.ingest_minutes || 150 }}"
 
