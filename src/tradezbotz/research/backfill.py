@@ -128,6 +128,30 @@ class BackfillRunner:
         self._conn.commit()
         return added
 
+    def requeue(self, statuses: Sequence[str] = (DONE, FAILED)) -> int:
+        """Return finished symbols to the queue.
+
+        Needed when what "done" *means* has changed, rather than when the data
+        went stale. Switching vendor did exactly that: symbols marked done held
+        two years of price-only bars from Massive, while the new source stores
+        ten years on two adjustment bases. The checkpoint would otherwise skip
+        them forever, leaving a cache silently half-migrated -- some symbols deep
+        and dual-basis, others shallow and single-basis, with nothing in the data
+        to say which.
+
+        Attempt counts reset too, so symbols parked as `failed` against the old
+        vendor get a fair retry against the new one.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        marks = ",".join("?" for _ in statuses)
+        cur = self._conn.execute(
+            f"UPDATE backfill SET status = ?, attempts = 0, last_error = NULL, "
+            f"updated_at = ? WHERE status IN ({marks})",
+            (PENDING, now, *statuses),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def pending(self, limit: int | None = None) -> list[str]:
         sql = (
             "SELECT symbol FROM backfill WHERE status = ? "
@@ -249,27 +273,3 @@ def symbols_from_events(events: Iterable[dict]) -> list[str]:
     """Distinct, sorted symbols from an event iterable."""
     seen = {(e.get("symbol") or "").upper() for e in events}
     return sorted(s for s in seen if s)
-
-    def requeue(self, statuses: Sequence[str] = (DONE, FAILED)) -> int:
-        """Return finished symbols to the queue.
-
-        Needed when what "done" means has changed rather than when the data went
-        stale. Switching vendor did exactly that: symbols marked done held two
-        years of price-only bars from Massive, while the new source stores ten
-        years on two adjustment bases. The checkpoint would otherwise skip them
-        forever, leaving a cache that is silently half-migrated -- some symbols
-        deep and dual-basis, others shallow and single-basis, with nothing in the
-        data to say which.
-
-        Attempt counts are reset too, so symbols parked as `failed` against the
-        old vendor get a fair retry against the new one.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        marks = ",".join("?" for _ in statuses)
-        cur = self._conn.execute(
-            f"UPDATE backfill SET status = ?, attempts = 0, last_error = NULL, "
-            f"updated_at = ? WHERE status IN ({marks})",
-            (PENDING, now, *statuses),
-        )
-        self._conn.commit()
-        return cur.rowcount

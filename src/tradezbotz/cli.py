@@ -386,6 +386,15 @@ def _run_backfill(args: argparse.Namespace) -> int:
     from .research.watchlist import Watchlist
     watched = Watchlist().symbols()
     if watched:
+        # Enqueue as well as prioritise. `prioritise` only reorders, by design --
+        # it must never shrink the queue -- but that left a watched symbol which
+        # was never queued permanently unfetched, while `watch status` claimed it
+        # would be picked up next run. Adding to the FETCH queue is safe: it
+        # obtains bars, and bars are not events. The research universe still
+        # comes only from ingested filings.
+        added = runner.enqueue(watched)
+        if added:
+            print(f"watchlist: queued {added} watched symbols that were absent")
         print(f"watchlist: {len(watched)} symbols fetched first "
               f"({', '.join(watched[:8])}{'...' if len(watched) > 8 else ''})")
 

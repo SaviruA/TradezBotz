@@ -199,3 +199,65 @@ def test_symbols_from_events_dedupes_and_sorts():
     ]
 
     assert symbols_from_events(events) == ["AAPL", "MSFT"]
+
+
+# --- requeue ---------------------------------------------------------------------
+
+def test_requeue_returns_finished_symbols_to_the_queue(tmp_path):
+    """Shipped broken once: the method was appended to the wrong scope, so it
+    was never on the class and only failed in CI under --requeue, which no test
+    exercised."""
+    runner = BackfillRunner(None, tmp_path / "c.db",
+                            start=date(2024, 1, 1), end=date(2024, 2, 1))
+    runner.enqueue(["AAA", "BBB", "CCC"])
+    runner._record_success("AAA", 500, True)
+    runner._record_success("BBB", 500, True)
+
+    assert runner.pending() == ["CCC"]
+    moved = runner.requeue()
+
+    assert moved == 2
+    assert runner.pending() == ["AAA", "BBB", "CCC"]
+    runner.close()
+
+
+def test_requeue_is_a_method_on_the_runner():
+    """Pins the actual defect: it parsed fine but was nested inside a
+    module-level function, so the attribute never existed."""
+    assert callable(getattr(BackfillRunner, "requeue", None))
+
+
+def test_requeue_resets_attempts_so_parked_failures_retry(tmp_path):
+    runner = BackfillRunner(None, tmp_path / "c.db",
+                            start=date(2024, 1, 1), end=date(2024, 2, 1))
+    runner.enqueue(["BAD"])
+    for _ in range(5):
+        runner._record_failure("BAD", RuntimeError("vendor said no"))
+
+    assert runner.pending() == [], "parked after max_attempts"
+    runner.requeue()
+
+    assert runner.pending() == ["BAD"]
+    runner.close()
+
+
+def test_requeue_on_an_empty_queue_moves_nothing(tmp_path):
+    runner = BackfillRunner(None, tmp_path / "c.db",
+                            start=date(2024, 1, 1), end=date(2024, 2, 1))
+    runner.enqueue(["AAA"])
+
+    assert runner.requeue() == 0, "AAA is still pending, not finished"
+    runner.close()
+
+
+def test_a_runner_without_a_source_can_queue_but_not_fetch(tmp_path):
+    """Queueing and progress need no vendor credentials; fetching does. This
+    split is what let enqueue-symbols run in a job holding no price keys."""
+    runner = BackfillRunner(None, tmp_path / "c.db",
+                            start=date(2024, 1, 1), end=date(2024, 2, 1))
+    runner.enqueue(["AAA"])
+
+    assert runner.progress().total == 1
+    with pytest.raises(PriceError, match="without a price source"):
+        runner.run()
+    runner.close()
