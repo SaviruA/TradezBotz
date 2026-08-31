@@ -516,3 +516,131 @@ def gain_over(bars: Sequence[Bar], i: int, lookback: int = 21,
     if past <= 0:
         return False
     return (bars[i].close / past - 1.0) >= threshold
+
+
+# --- candle patterns and community indicators ---------------------------------
+
+def engulfing(bars: Sequence[Bar], i: int, bullish: bool = True) -> bool:
+    """Whether bar i engulfs the previous bar's body.
+
+    Bullish: previous bar closed down, this one closed up, and this body spans
+    the prior body. Compares bodies rather than the full range, which is the
+    conventional definition and the stricter one.
+    """
+    if i < 1 or i >= len(bars):
+        return False
+    prev, cur = bars[i - 1], bars[i]
+    if bullish:
+        return (prev.close < prev.open and cur.close > cur.open
+                and cur.close >= prev.open and cur.open <= prev.close)
+    return (prev.close > prev.open and cur.close < cur.open
+            and cur.close <= prev.open and cur.open >= prev.close)
+
+
+#: Keltner multiplier for the TTM squeeze. 1.5 ATR is the convention.
+KELTNER_MULT = 1.5
+
+
+def keltner(bars: Sequence[Bar], period: int = 20,
+            mult: float = KELTNER_MULT) -> tuple[list[float | None], list[float | None]]:
+    """Keltner channels: an EMA centre with ATR-scaled bands."""
+    closes = _closes(bars)
+    centre = ema(closes, period)
+    a = atr(bars, period)
+    upper: list[float | None] = [None] * len(bars)
+    lower: list[float | None] = [None] * len(bars)
+    for i in range(len(bars)):
+        if centre[i] is None or a[i] is None:
+            continue
+        upper[i] = centre[i] + mult * a[i]
+        lower[i] = centre[i] - mult * a[i]
+    return upper, lower
+
+
+def ttm_squeeze(bars: Sequence[Bar], i: int, period: int = BB_PERIOD) -> bool:
+    """Bollinger bands entirely inside the Keltner channels.
+
+    The conventional squeeze definition, and the one behind LazyBear's Squeeze
+    Momentum -- the most-liked open indicator on TradingView at ~76,000 likes.
+    We already have `bollinger_squeeze`, which uses a bandwidth percentile
+    instead; this exists so the two can be compared rather than assumed
+    equivalent, since they disagree about what "compressed" means.
+
+    Worth recording that LazyBear himself says the squeeze alone misses good
+    entries and wants ADX or a momentum indicator alongside. That is the same
+    thing Bollinger says about band tags, and the same reason every selector
+    here is built for `all_of` rather than standalone use.
+    """
+    if i < period or i >= len(bars):
+        return False
+    bb = bollinger(bars, period)
+    ku, kl = keltner(bars, period)
+    if None in (bb.upper[i], bb.lower[i], ku[i], kl[i]):
+        return False
+    return bb.upper[i] < ku[i] and bb.lower[i] > kl[i]
+
+
+#: Connors uses a 2-period RSI. The point is sensitivity: at this length the
+#: oscillator reaches extremes often enough to trade, where RSI(14) rarely does.
+CONNORS_RSI_PERIOD = 2
+CONNORS_OVERSOLD = 10.0
+CONNORS_TREND_PERIOD = 200
+
+
+def connors_rsi2(bars: Sequence[Bar], i: int,
+                 level: float = CONNORS_OVERSOLD,
+                 trend_period: int = CONNORS_TREND_PERIOD) -> bool:
+    """Larry Connors' RSI(2) mean reversion setup, with its trend filter.
+
+    Buy short-term panic, but only above the long-term moving average. The trend
+    filter is not optional decoration -- without it the rule buys falling knives,
+    and Connors is explicit that the setup is mean reversion *within* an uptrend.
+
+    Published win rates are high (75-79% over long backtests) and that is exactly
+    what to be careful about: a high hit rate with a small average win and an
+    uncapped loss is the classic shape that looks excellent until it does not.
+    `outlier_dependent` and the cost model are the checks that matter here, not
+    the win rate.
+    """
+    if i >= len(bars):
+        return False
+    r = rsi(bars, CONNORS_RSI_PERIOD)[i]
+    if r is None or r > level:
+        return False
+    return above_ma(bars, i, period=trend_period)
+
+
+#: Reconstruction parameters for the signal shape described below.
+RECON_RSI_LEVEL = 30.0
+RECON_TREND_PERIOD = 50
+
+
+def engulfing_reversal(bars: Sequence[Bar], i: int,
+                       rsi_level: float = RECON_RSI_LEVEL,
+                       trend_period: int = RECON_TREND_PERIOD) -> bool:
+    """Bullish engulfing at an oversold RSI, in an uptrend.
+
+    An open reconstruction of the signal shape sold as GainzAlgo, assembled from
+    its own published description: EMA trend, RSI momentum, ATR bands, and
+    engulfing candles with ATR-scaled targets.
+
+    **This is not that product and cannot be.** The product is closed, so its
+    parameters and -- more importantly -- the number of variants tried before
+    release are both unknown. That second unknown is the one that matters: the
+    Deflated Sharpe is meaningless without a trial count, so a black box cannot
+    be evaluated honestly at all. What can be evaluated is the *idea*, built in
+    the open with canonical parameters and no sweeping, exactly like every other
+    indicator in this module.
+
+    A result here says something about engulfing-plus-oversold-plus-trend. It
+    says nothing about the vendor's implementation, and must never be reported
+    as though it did.
+    """
+    if i >= len(bars):
+        return False
+    if not engulfing(bars, i, bullish=True):
+        return False
+    r = rsi(bars)[i]
+    if r is None or r > rsi_level:
+        return False
+    return above_ma(bars, i, period=trend_period)

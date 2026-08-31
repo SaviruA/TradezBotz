@@ -59,6 +59,9 @@ listed; crypto-only and broker-API entries were skipped.
 | Heikin-Ashi | planned | smoothed candles; a trend filter with a different lag profile from an MA |
 | Dual Thrust | planned | open-range breakout with a volatility-scaled band |
 | Parabolic SAR | planned | trailing stop rule; more interesting as an *exit* than an entry, and we have no exit rules yet |
+| **TTM squeeze** (Bollinger inside Keltner) | built | `indicators.ttm_squeeze` | the conventional squeeze; LazyBear's ~76k-like open indicator. Control for our percentile version |
+| **Connors RSI(2)** | built | `indicators.connors_rsi2` | 2-period RSI oversold, above the 200MA. High published win rate -- see the caveat |
+| **Engulfing reversal** | built | `indicators.engulfing_reversal` | open reconstruction of the GainzAlgo signal shape -- see the caveat |
 | **Darvas Box** | planned | event-anchored box from a new 12-month high; see the caveat below |
 | Awesome Oscillator | planned | momentum via 5/34 median-price MAs; overlaps MACD, so worth testing as a substitute rather than an addition |
 
@@ -113,10 +116,11 @@ at 140 observations and OperatingIncomeLoss at 168. The frames endpoint returns
 | hypothesis | status | notes |
 | --- | --- | --- |
 | **Non-preplanned insider selling** | planned | Form 4 `aff10b5One` = false. The sell-side mirror of the routine/opportunistic classifier. **Coverage constraint below.** |
-| Margin compression (gross + operating) | planned | 4 consecutive quarters of decline; GrossProfit / OperatingIncomeLoss / Revenues |
-| Price/Sales, Price/FCF, EV/EBITDA | planned | XBRL plus our own prices; no vendor needed |
-| YoY revenue growth | planned | conditioner rather than a signal on its own |
-| Value/Growth score (P/S ÷ growth) | planned | a sales-based PEG variant; low = most growth per dollar of valuation |
+| Margin compression (gross + operating) | built | 4 consecutive quarters of decline; GrossProfit / OperatingIncomeLoss / Revenues |
+| Price/Sales + gross margin | built | `fundamentals.Snapshot` -- P/E is undefined for 74% of small caps |
+| Price/FCF, EV/EBITDA | planned | XBRL plus our own prices; no vendor needed |
+| YoY revenue growth | built | conditioner rather than a signal on its own |
+| Value/Growth score (P/S ÷ growth) | built | a sales-based PEG variant; low = most growth per dollar of valuation |
 | Customer concentration > 25% | blocked | 10-K narrative text, not tagged in XBRL |
 | GAAP vs non-GAAP gap, guidance cuts | blocked | narrative text |
 
@@ -238,6 +242,27 @@ Consequences, all enforced in code:
 Affordability is why exact classification is realistic at all: insider buying
 concentrates in small caps, and a full session of those is 127-1,227 prints. A
 mega-cap session is millions and is not attempted.
+
+## Two caveats on the community indicators
+
+**Connors RSI(2)** publishes win rates of 75-79% over long backtests, and that
+is the thing to be careful about rather than the thing to be encouraged by. A
+high hit rate with a small average win and an uncapped loss is the classic shape
+that looks excellent until it does not. `outlier_dependent`, `survives_costs`
+and the winsorised mean are the checks that matter here; the win rate is close
+to uninformative on its own.
+
+**`engulfing_reversal` is a reconstruction, not a product.** It was assembled
+from GainzAlgo's own published description -- EMA trend, RSI momentum, ATR
+bands, engulfing candles, ATR-scaled targets -- because the product itself is
+closed and therefore cannot be evaluated honestly at all: the Deflated Sharpe is
+meaningless without a trial count, and the number of variants tried before
+release is unknowable from outside.
+
+So we test the *idea* in the open, with canonical parameters and no sweeping,
+like everything else here. A result says something about
+engulfing-plus-oversold-plus-trend. It says nothing about the vendor's
+implementation and must never be reported as though it did.
 
 ## The Darvas Box caveat
 

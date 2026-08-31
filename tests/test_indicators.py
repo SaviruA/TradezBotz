@@ -20,11 +20,15 @@ from tradezbotz.research.indicators import (
     above_ma,
     bollinger,
     bollinger_squeeze,
+    connors_rsi2,
     distance_from_high,
     donchian,
     donchian_breakout,
     gain_over,
     ema,
+    engulfing,
+    engulfing_reversal,
+    keltner,
     macd,
     momentum,
     near_high,
@@ -35,6 +39,7 @@ from tradezbotz.research.indicators import (
     sma,
     swept_high,
     swept_low,
+    ttm_squeeze,
     true_range,
 )
 from tradezbotz.research.prices import Bar
@@ -504,3 +509,101 @@ def test_high_features_are_safe_on_short_series():
     assert near_high(bars, 4) in (True, False)
     assert gain_over(bars, 4) is False
     assert distance_from_high(bars, 99) is None
+
+
+# --- candle patterns and community indicators ----------------------------------
+
+def test_bullish_engulfing_needs_a_down_bar_then_a_larger_up_bar():
+    down_then_up = [Bar(date(2025, 1, 1), 10.0, 10.2, 9.5, 9.6, 1e6),
+                    Bar(date(2025, 1, 2), 9.4, 10.5, 9.3, 10.4, 1e6)]
+
+    assert engulfing(down_then_up, 1, bullish=True) is True
+
+
+def test_engulfing_compares_bodies_not_ranges():
+    """A big wick is not an engulfing. The body comparison is the stricter and
+    conventional definition."""
+    wick_only = [Bar(date(2025, 1, 1), 10.0, 10.2, 9.5, 9.6, 1e6),
+                 Bar(date(2025, 1, 2), 9.55, 12.0, 9.5, 9.7, 1e6)]
+
+    assert engulfing(wick_only, 1, bullish=True) is False
+
+
+def test_bearish_engulfing_is_the_mirror():
+    up_then_down = [Bar(date(2025, 1, 1), 9.6, 10.2, 9.5, 10.0, 1e6),
+                    Bar(date(2025, 1, 2), 10.2, 10.3, 9.2, 9.4, 1e6)]
+
+    assert engulfing(up_then_down, 1, bullish=False) is True
+    assert engulfing(up_then_down, 1, bullish=True) is False
+
+
+def test_engulfing_is_safe_at_the_first_bar():
+    assert engulfing(bars_from(rising(5)), 0) is False
+
+
+def test_keltner_brackets_price():
+    """On an oscillating series, not a monotonic one. In a steady trend the EMA
+    centre lags and price legitimately rides outside the band -- that is the
+    channel working, not failing."""
+    import random
+    rng = random.Random(8)
+    closes, p = [], 100.0
+    for _ in range(200):
+        p *= 1 + rng.gauss(0, 0.015)
+        closes.append(p)
+    bars = bars_from(closes)
+    upper, lower = keltner(bars)
+
+    inside = sum(1 for i in range(60, 200)
+                 if upper[i] is not None and lower[i] < bars[i].close < upper[i])
+
+    assert inside > 100, "most bars sit inside the channel on a random walk"
+
+
+def test_ttm_squeeze_fires_when_bollinger_sits_inside_keltner():
+    """The conventional squeeze, and the basis of the most-liked open indicator
+    on TradingView. Deliberately separate from our percentile version, because
+    the two disagree about what 'compressed' means."""
+    import random
+    rng = random.Random(4)
+    closes, p = [], 100.0
+    for i in range(300):
+        p *= 1 + rng.gauss(0, 0.03 if i < 250 else 0.0005)
+        closes.append(p)
+    bars = bars_from(closes)
+
+    assert ttm_squeeze(bars, 295) is True
+    assert ttm_squeeze(bars, 150) is False
+
+
+def test_connors_rsi2_requires_the_trend_filter():
+    """Without it the rule buys falling knives. Connors is explicit that it is
+    mean reversion WITHIN an uptrend."""
+    falling = bars_from([400 - i for i in range(300)])
+
+    assert connors_rsi2(falling, 299) is False, "oversold, but below its MA"
+
+
+def test_connors_rsi2_fires_on_a_dip_in_an_uptrend():
+    closes = [100.0 + i * 0.5 for i in range(280)] + [240.0, 232.0, 224.0, 216.0]
+    bars = bars_from(closes)
+
+    assert connors_rsi2(bars, len(closes) - 1) is True
+
+
+def test_engulfing_reversal_needs_all_three_conditions():
+    """The open reconstruction: engulfing AND oversold AND above the trend MA.
+    Any one alone must not fire it."""
+    uptrend = [100.0 + i * 0.5 for i in range(200)]
+    bars = bars_from(uptrend)
+
+    # in an uptrend but not oversold and not engulfing
+    assert engulfing_reversal(bars, 199) is False
+
+
+def test_community_selectors_are_safe_on_short_series():
+    bars = bars_from(rising(5))
+
+    assert ttm_squeeze(bars, 4) is False
+    assert connors_rsi2(bars, 4) is False
+    assert engulfing_reversal(bars, 4) is False
