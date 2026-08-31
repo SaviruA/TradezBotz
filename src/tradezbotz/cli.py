@@ -26,9 +26,28 @@ CHECKPOINT_DB = "backfill.db"
 PROFILES_DB = "profiles.db"
 KIND_INSIDER = "insider_transaction"
 
-#: Free-tier price history ceiling. Events older than this can never be
-#: labelled, because no price data exists to measure their outcome.
-PRICE_WINDOW_DAYS = 730
+#: Price history ceiling: events older than this cannot be labelled, because no
+#: price data exists to measure their outcome.
+#:
+#: This was 730 for as long as Massive was the price vendor, whose free tier
+#: serves roughly two years regardless of what is asked for. Alpaca serves 2016
+#: onward, so the ceiling moved with the vendor -- and the old value was doing
+#: real damage in the meantime: of 183,011 stored insider events, only **1,774**
+#: fell inside a 730-day window. The other 99% were ingested, stored, and then
+#: excluded from every backtest by a constant describing a vendor we no longer
+#: use for this.
+#:
+#: The effect on dependence is the reason this matters beyond raw count. Events
+#: were concentrated into two years of trading days, so the date dimension had
+#: few distinct clusters and cross-sectional correlation was correspondingly
+#: severe. Spreading the same events over ten years multiplies the distinct
+#: dates by roughly five, which is the single largest lever available on the
+#: effective sample size.
+PRICE_WINDOW_DAYS = 3800  # ~2016 onward, matching ALPACA_HISTORY_DAYS
+
+#: What the free Massive tier actually served. Kept because `--vendor massive`
+#: still works and its ceiling is real; it is no longer the default.
+MASSIVE_WINDOW_DAYS = 730
 
 #: How much EDGAR history to ingest by default. Deliberately deeper than the
 #: price window: the routine/opportunistic classifier needs 3+ years of an
@@ -153,7 +172,7 @@ def cmd_ingest_bulk(args: argparse.Namespace) -> int:
 
     end = args.end or date.today()
     start = args.start or (end - timedelta(days=args.days))
-    cutoff = args.before or (date.today() - timedelta(days=PRICE_WINDOW_DAYS))
+    cutoff = args.before or (date.today() - timedelta(days=MASSIVE_WINDOW_DAYS))
 
     # flush: these run under nohup and systemd, where an unflushed header makes
     # a working job look hung for the ~9 minutes a first quarter takes.
@@ -321,7 +340,7 @@ def _make_runner(limit_per_minute: int | None = None, *, vendor: str = "alpaca",
             cache=cache,
             per_minute=limit_per_minute or DEFAULT_REQUESTS_PER_MINUTE,
         )
-        window = PRICE_WINDOW_DAYS
+        window = MASSIVE_WINDOW_DAYS
     else:
         source = DualBasisSource.alpaca(
             cache=cache,
