@@ -1,0 +1,19 @@
+# Symbols to pay special attention to.
+#
+# Affects FETCH PRIORITY and REPORTING only -- never the backtest
+# universe. A hand-picked list is chosen by someone who already knows
+# how those names did, so measuring only them is lookahead laundered
+# through human memory, and no guardrail in this repo can detect it.
+# See src/tradezbotz/research/watchlist.py.
+#
+# Edit by hand or use: python -m tradezbotz watch add SYM --reason "..."
+symbols:
+- symbol: ARI
+  reason: highest dividend gap found; total-return basis test case
+  added: '2026-08-31'
+- symbol: NVDA
+  reason: Jensen Huang mentions move markets; your original ask
+  added: '2026-08-31'
+- symbol: XELB
+  reason: known split-adjustment fault; keep verifying against the referee
+  added: '2026-08-31'

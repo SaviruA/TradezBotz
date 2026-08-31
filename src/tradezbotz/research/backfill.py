@@ -173,8 +173,18 @@ class BackfillRunner:
         *,
         limit: int | None = None,
         on_progress: Callable[[str, Progress], None] | None = None,
+        priority: Sequence[str] | None = None,
     ) -> Progress:
-        symbols = self.pending(limit)
+        # Priority reorders the queue; it never adds or removes. A watchlist
+        # that could shrink the queue would quietly shrink the measured
+        # universe, which is the one thing it must not do.
+        if priority:
+            from .watchlist import prioritise
+            symbols = prioritise(self.pending(), list(priority))
+            if limit:
+                symbols = symbols[:limit]
+        else:
+            symbols = self.pending(limit)
         prog = self.progress()
         prog.started_at = time.monotonic()
 

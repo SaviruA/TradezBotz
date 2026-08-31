@@ -376,8 +376,14 @@ def _run_backfill(args: argparse.Namespace) -> int:
     def report(symbol: str, prog) -> None:
         print(f"[{prog.done + prog.failed:5d}] {symbol:8s} {prog}", flush=True)
 
+    from .research.watchlist import Watchlist
+    watched = Watchlist().symbols()
+    if watched:
+        print(f"watchlist: {len(watched)} symbols fetched first "
+              f"({', '.join(watched[:8])}{'...' if len(watched) > 8 else ''})")
+
     print(f"starting: {runner.progress()}")
-    prog = runner.run(limit=args.limit, on_progress=report)
+    prog = runner.run(limit=args.limit, on_progress=report, priority=watched)
     print(f"\nfinished: {prog}")
 
     failures = runner.failures()
@@ -566,6 +572,12 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
         if not symbols:
             print("no cached symbols; run backfill first")
             return 1
+        # Watched names first, so a time-boxed run always covers them.
+        from .research.watchlist import Watchlist, prioritise
+        watched = Watchlist().symbols()
+        if watched:
+            symbols = prioritise(symbols, watched)
+            print(f"watchlist: {len(watched)} symbols reduced first")
         symbols = symbols[: args.limit] if args.limit else symbols
 
         store = ProfileStore(DEFAULT_STATE / PROFILES_DB)
@@ -695,6 +707,76 @@ def cmd_ingest_filings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Manage the watchlist.
+
+    The watchlist changes fetch priority and reporting. It never changes the
+    measured universe -- see research/watchlist.py for why that firewall exists.
+    """
+    from .research.watchlist import Watchlist, WatchlistError
+
+    wl = Watchlist(args.file)
+
+    if args.action == "add":
+        try:
+            entry = wl.add(args.symbol, args.reason or "")
+        except WatchlistError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"watching {entry.symbol}: {entry.reason}")
+        print(f"saved to {wl.path}")
+        return 0
+
+    if args.action == "remove":
+        if wl.remove(args.symbol):
+            print(f"removed {args.symbol.upper()}")
+            return 0
+        print(f"{args.symbol.upper()} was not on the list", file=sys.stderr)
+        return 1
+
+    entries = wl.load()
+    if not entries:
+        print("watchlist is empty")
+        print(f"  add one:  python -m tradezbotz watch add NVDA --reason \"...\"")
+        return 0
+
+    if args.action == "list":
+        print(f"{len(entries)} watched symbols  ({wl.path})\n")
+        for e in entries:
+            print(f"  {e.symbol:8s} added {e.added}  {e.reason}")
+        return 0
+
+    # status: what we actually hold for each watched name
+    from .research.prices import BASES, PriceCache
+    from .research.intraday import ProfileStore
+
+    cache = PriceCache(DEFAULT_STATE / BARS_DB)
+    profiles_path = DEFAULT_STATE / PROFILES_DB
+    store = ProfileStore(profiles_path) if profiles_path.exists() else None
+    end = date.today()
+    start = end - timedelta(days=ALPACA_HISTORY_DAYS)
+
+    print(f"{'symbol':8}{'bases':>14}{'bars':>8}{'from':>12}{'sessions':>10}  reason")
+    print("-" * 78)
+    for e in entries:
+        held = cache.bases(e.symbol)
+        series = cache.get(e.symbol, start, end) if held else None
+        n = len(series.bars) if series else 0
+        first = series.bars[0].day.isoformat() if series and series.bars else "-"
+        sessions = len(store.range(e.symbol, start, end)) if store else 0
+        print(f"{e.symbol:8}{'/'.join(held) or 'none':>14}{n:>8}{first:>12}"
+              f"{sessions:>10}  {e.reason[:30]}")
+    uncovered = [e.symbol for e in entries if not cache.bases(e.symbol)]
+    cache.close()
+    if store:
+        store.close()
+    if uncovered:
+        print(f"\n  {len(uncovered)} watched symbols have no bars yet: "
+              f"{', '.join(uncovered)}")
+        print("  They are queued first on the next backfill.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradezbotz")
     sub = p.add_subparsers(dest="command", required=True)
@@ -801,6 +883,19 @@ def build_parser() -> argparse.ArgumentParser:
     fil.add_argument("--force", action="store_true",
                      help="re-ingest days already marked done")
     fil.set_defaults(func=cmd_ingest_filings)
+
+    wt = sub.add_parser("watch",
+                        help="symbols to pay special attention to (fetch "
+                             "priority and reporting only, never the backtest "
+                             "universe)")
+    wt.add_argument("action", choices=("list", "add", "remove", "status"),
+                    nargs="?", default="list")
+    wt.add_argument("symbol", nargs="?", default="")
+    wt.add_argument("--reason", help="why this symbol is worth watching "
+                                     "(required when adding)")
+    wt.add_argument("--file", default="watchlist.yml",
+                    help="watchlist location (versioned in the repo by design)")
+    wt.set_defaults(func=cmd_watch)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)
