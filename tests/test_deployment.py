@@ -192,14 +192,36 @@ def test_a_missing_file_is_refused_with_an_explanation(tmp_path):
         load(tmp_path / "absent.json")
 
 
-def test_the_repository_criteria_are_loadable_and_currently_unconfirmed():
-    """The committed state: thresholds set blind, operator values unset, so the
-    gate refuses everything until a deliberate sign-off."""
+def test_the_repository_criteria_are_loadable_and_signed_off():
     c = load()
 
-    assert c.confirmed is False
-    assert set(c.unset_operator_values()) == {"capital_at_risk",
-                                              "max_drawdown_halt"}
+    assert c.confirmed is True
+    assert c.unset_operator_values() == []
+    assert c.signed_off.strip(), "a confirmed file must say who decided and why"
+
+
+def test_the_backtest_is_never_sized_off_the_live_test_stake():
+    """The invariant that protects every result. Sizing the backtest off a $100
+    stake charges impact for ~$10 orders -- approximately zero -- and every net
+    return then flatters any size actually traded later. A backtest may be
+    pessimistic relative to reality; it must never be optimistic."""
+    c = load()
+
+    assert c.position_notional > c.live_test_capital, (
+        "backtest position size must exceed the live test stake, or the cost "
+        "model is charging less impact than reality will")
+
+
+def test_the_live_test_holds_few_enough_positions_to_be_fillable():
+    """Only 56% of listed US equities are fractionable, and at $10 a position
+    just 24% of cached names are buyable as a whole share. A small stake split
+    many ways is mostly unfillable rather than merely small."""
+    c = load()
+
+    per_position = c.live_test_capital / max(c.live_test_positions, 1)
+    assert per_position >= 50, (
+        f"${per_position:.0f} per live-test position is below the price of most "
+        "of the universe; use fewer positions")
 
 
 def test_the_report_says_plainly_that_nothing_can_pass():

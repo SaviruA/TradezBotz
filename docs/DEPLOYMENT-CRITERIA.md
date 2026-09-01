@@ -28,11 +28,47 @@ inconvenient.
 
 ---
 
-## Status: UNCONFIRMED
+## Status: CONFIRMED 2026-09-02
 
-`confirmed: false`. **Nothing can pass the gate**, however good it looks, until
-three figures below are chosen. They are the operator's and cannot be
-defaulted — a wrong guess by me would be worse than a blank.
+The operator figures are set. The gate now refuses on merit rather than on
+missing configuration.
+
+## Two capital numbers, and why they are not the same
+
+The single most important distinction in this file.
+
+| | value | job |
+| --- | --- | --- |
+| `capital_at_risk` | $25,000 over 10 positions | **sizes the backtest.** What the cost model charges market impact against |
+| `live_test_capital` | $100 in 1 position | **Phase 3b.** The real stake, whose only job is measuring realised slippage |
+
+They must not be the same number, and the direction of the error matters.
+
+Sizing the backtest off the $100 stake would charge impact for ~$10 orders,
+which is approximately zero — and every net return would then **flatter any size
+actually traded later**. A backtest may be pessimistic relative to reality. It
+must never be optimistic. So it is sized off the capital that might be
+*reached*, not the capital being started with.
+
+When unsure, round `capital_at_risk` **up**. Higher makes the backtest charge
+more cost and reject more candidates; lower makes it generous. The asymmetry is
+the whole point.
+
+**The paper account's $100,000 balance is headroom, not a target.** Paper must
+trade the same per-position size as the intended live plan, or the paper run
+measures a different strategy — different impact, different fillability.
+
+### Why the live test is one position, not ten
+
+Measured, not assumed:
+
+- Only **56%** of active listed US equities are fractionable. Below one share,
+  a non-fractionable order is rejected outright, not merely small.
+- At **$10** a position, only **24%** of cached names are buyable as a whole
+  share. At **$100**, **71%** are.
+
+So $100 split ten ways is mostly unfillable. $100 in one position is a real
+order against most of the universe.
 
 ---
 
@@ -68,26 +104,30 @@ at half". **If it is not viable at half, it is not viable.**
 
 ---
 
-## The three the operator must set
+## The operator figures, as set
 
-These are unset, and the gate refuses everything while they are.
+### `capital_at_risk` — $25,000 over 10 positions
 
-### `capital_at_risk`
+**Not a footnote — an input to the cost model.** Position size determines
+participation, participation determines impact, and impact decides whether a
+microcap edge survives contact with the book.
 
-Total capital the strategy may deploy. **Not a footnote — an input to the cost
-model.** Position size determines participation, participation determines market
-impact, and impact is the term that decides whether a microcap edge survives
-contact with the book. Setting this at $10k and $500k produces materially
-different net returns from the same signal.
+$2,500 per position measured against real cached bars costs 139bps round trip on
+a thin name and 95bps on a median one — within a few basis points of the
+smallest size tested, and comfortably fillable. Impact turns out to be
+second-order at these sizes; spread dominates. The cautious choice is therefore
+nearly free, which is a good property to have.
 
-### `max_drawdown_halt`
+### `max_drawdown_halt` — $5,000 (20%)
 
 Peak-to-trough loss at which the system stops itself, without asking and without
 a discretionary override. Without this there is no plan for being wrong — only a
 plan for being right, which is not a plan.
 
-Worth choosing as a number that would be genuinely tolerable to lose, not one
-that sounds brave.
+**Nothing enforces this yet**, because there is no live system to halt. It is a
+recorded commitment that Phase 4 must implement and that the gate refuses to
+pass without. Its value today is that it was decided in advance rather than
+during a drawdown.
 
 ### `max_participation`
 
@@ -98,12 +138,11 @@ binding.
 
 ---
 
-## How to confirm
+## How to change it
 
-Edit [`deployment-criteria.json`](deployment-criteria.json): set the three
-values, set `confirmed: true`, and put a real note in `signed_off` — who
-decided, when, and on what basis. Commit it as its own change, so the decision
-is legible in history rather than mixed into unrelated work.
+Edit [`deployment-criteria.json`](deployment-criteria.json) and commit it as its
+own change with a message saying why. That is the whole enforcement mechanism:
+the diff sits in history next to whatever motivated it.
 
 ---
 

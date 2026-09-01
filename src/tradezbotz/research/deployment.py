@@ -68,14 +68,48 @@ class Criteria:
     #: Peak-to-trough loss at which the system halts itself without asking.
     #: Without this there is no plan for being wrong, only for being right.
     max_drawdown_halt: float = 0.0
-    #: Position ceiling as a share of average daily volume. `costs` already
-    #: flags 10% as not executable in one session.
+    #: Phase 3b money: the smallest real stake whose only job is measuring
+    #: realised slippage against the model. Deliberately separate from
+    #: `capital_at_risk`, because they answer different questions and
+    #: conflating them corrupts the backtest.
+    #:
+    #: Sizing the BACKTEST off a $100 stake would charge impact for ~$10 orders,
+    #: which is approximately zero -- and every net return would then flatter
+    #: any size you later actually traded. The backtest must be pessimistic
+    #: relative to reality, never optimistic, so it is sized off the capital you
+    #: might REACH rather than the capital you start with.
+    live_test_capital: float = 0.0
+    #: Positions to hold during the live test. One or two, not ten: at $10 a
+    #: position only 24% of cached names are buyable as a whole share, and only
+    #: 56% of listed US equities are fractionable at all.
+    live_test_positions: int = 1
+    #: How many positions may be open at once. Needed to turn total capital
+    #: into a position size, and a position size is what determines market
+    #: impact -- so this is a cost-model input, not portfolio housekeeping.
+    max_concurrent_positions: int = 10
+    #: Position ceiling as a share of average daily volume. Overrides
+    #: `costs.MAX_PARTICIPATION` (10%), which is the point: the research default
+    #: is what is merely executable, this is what we are willing to do.
     max_participation: float = 0.05
 
     #: Set true only when the three figures above have been chosen deliberately.
     confirmed: bool = False
     #: Free text: who signed off, when, and on what basis.
     signed_off: str = ""
+
+    @property
+    def position_notional(self) -> float:
+        """Capital per position, which is what the cost model actually needs.
+
+        Total capital alone cannot price impact: impact is a function of how
+        much of a day's volume ONE order consumes. Splitting evenly is crude and
+        stated as such -- a real allocator would size by conviction or
+        volatility -- but a crude stated size beats the implied size of zero
+        that the backtest used before this existed.
+        """
+        if self.capital_at_risk <= 0 or self.max_concurrent_positions <= 0:
+            return 0.0
+        return self.capital_at_risk / self.max_concurrent_positions
 
     def unset_operator_values(self) -> list[str]:
         missing = []

@@ -1487,8 +1487,31 @@ def cmd_measure(args: argparse.Namespace) -> int:
         # performance rather than an estimate of it. Sizing is still crude --
         # equal notional per trade -- but a stated crude size beats an implied
         # size of zero.
-        costs = CostTable(cache, model=CostModel(), basis=basis,
-                          capital_per_trade=args.capital)
+        # Sizing comes from the committed criteria when they exist, so the
+        # number that gates deployment is the same number the backtest charges
+        # impact against. They were independent before: the criteria could say
+        # $100k while the cost model silently assumed $25k, and nothing would
+        # have reported the disagreement.
+        model = CostModel()
+        per_position = args.capital
+        try:
+            from .research.deployment import load as load_criteria
+            crit = load_criteria()
+            if crit.position_notional > 0:
+                per_position = crit.position_notional
+                model = CostModel(max_participation=crit.max_participation)
+                print(f"sizing from deployment criteria: "
+                      f"${crit.capital_at_risk:,.0f} over "
+                      f"{crit.max_concurrent_positions} positions = "
+                      f"${per_position:,.0f} each, capped at "
+                      f"{crit.max_participation:.0%} of ADV")
+        except Exception as exc:  # noqa: BLE001
+            # No criteria committed yet, or unconfirmed. Fall back to the flag
+            # and say so, rather than silently using a different size.
+            print(f"sizing from --capital ${per_position:,.0f} "
+                  f"(deployment criteria not usable: {exc.__class__.__name__})")
+        costs = CostTable(cache, model=model, basis=basis,
+                          capital_per_trade=per_position)
 
     # Identity of this dataset, so a nightly re-run of the same sweep updates
     # its trials instead of appending new ones. Without this the Deflated Sharpe
