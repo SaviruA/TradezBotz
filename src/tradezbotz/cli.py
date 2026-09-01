@@ -38,6 +38,9 @@ ASSETS_DB = "assets.db"
 #: Daily geopolitical risk (Caldara & Iacoviello). One world-level series,
 #: so it conditions every event rather than describing any one symbol.
 MACRO_DB = "macro.db"
+#: Per-run step outcomes. A pipeline that reports success while a third of
+#: its steps have silently failed for a week is worse than one that fails.
+RUNLOG_DB = "runlog.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -1007,6 +1010,45 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_runlog(args: argparse.Namespace) -> int:
+    """Record a step outcome, or report pipeline health and fail if it is bad.
+
+    Two failure modes this closes. A run that never happens -- GitHub delays and
+    drops scheduled runs under load, and disables them entirely after 60 days
+    without repository activity, none of which raises a failure. And a run that
+    happens while doing nothing, because eight of twenty steps carry
+    `continue-on-error` and can fail on every run for weeks behind a green badge.
+    """
+    from .research.runlog import RunLog, describe
+
+    log = RunLog(DEFAULT_STATE / RUNLOG_DB)
+    try:
+        if args.action == "start":
+            log.start(args.run_id)
+            gap = log.hours_since_last_run()
+            if gap is not None:
+                print(f"last completed run {gap:.1f}h ago")
+            return 0
+
+        if args.action == "record":
+            log.record(args.run_id, args.step, args.outcome)
+            return 0
+
+        if args.action == "finish":
+            log.finish(args.run_id)
+            return 0
+
+        text, unhealthy = describe(log)
+        print(text)
+        if unhealthy and args.strict:
+            print("
+pipeline health check FAILED", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        log.close()
+
+
 def cmd_ingest_macro(args: argparse.Namespace) -> int:
     """Refresh the daily geopolitical risk series.
 
@@ -1696,6 +1738,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "default -- this is for diagnosing the sweep, not for "
                          "producing a finding")
     ms.set_defaults(func=cmd_measure, features=True, costs=True, joins=True)
+
+    rl = sub.add_parser("runlog",
+                        help="record step outcomes and check pipeline health")
+    rl.add_argument("action", choices=("start", "record", "finish", "report"))
+    rl.add_argument("--run-id", default="local")
+    rl.add_argument("--step", default="")
+    rl.add_argument("--outcome", default="success")
+    rl.add_argument("--strict", action="store_true",
+                    help="exit non-zero when the pipeline is unhealthy, so a "
+                         "silently broken run stops reporting success")
+    rl.set_defaults(func=cmd_runlog)
 
     mac = sub.add_parser("ingest-macro",
                          help="refresh the daily geopolitical risk series "
