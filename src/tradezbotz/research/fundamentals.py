@@ -60,6 +60,7 @@ import statistics
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Iterable, Sequence
 
 import requests
@@ -612,3 +613,85 @@ def margin_compressing(client: XbrlClient, cik: str | int, as_of: date,
     if len(margins) < quarters:
         return False
     return all(b < a for a, b in zip(margins, margins[1:]))
+
+# --- local facts cache -----------------------------------------------------------
+
+FACTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS company_facts (
+    cik        TEXT PRIMARY KEY,
+    facts      BLOB NOT NULL,
+    fetched_at TEXT NOT NULL,
+    concepts   INTEGER NOT NULL
+);
+"""
+
+
+class FactsCache:
+    """Compressed XBRL company facts, one row per issuer.
+
+    Measurement has to be offline. The SEC allows 8 requests a second and the
+    event store holds six figures of events across a few thousand issuers, so
+    fetching inside a backtest would take hours and make coverage depend on
+    when the run happened rather than on what was filed.
+
+    Stored gzipped because a companyfacts document runs to several megabytes of
+    JSON for a large filer and the state blob travels through an Actions cache.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        import sqlite3
+
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(FACTS_SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> "FactsCache":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    @staticmethod
+    def _key(cik: str | int) -> str:
+        """Unpadded decimal string. EDGAR writes CIKs padded, zero-stripped and
+        as integers in different places, and three spellings of one issuer would
+        be three cache misses."""
+        return str(int(str(cik).strip() or 0))
+
+    def has(self, cik: str | int) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM company_facts WHERE cik = ?", (self._key(cik),)
+        ).fetchone() is not None
+
+    def put(self, cik: str | int, raw: dict) -> None:
+        import gzip
+        import json
+
+        blob = gzip.compress(json.dumps(raw).encode("utf-8"))
+        concepts = len((raw.get("facts") or {}).get("us-gaap") or {})
+        self._conn.execute(
+            "INSERT OR REPLACE INTO company_facts VALUES (?,?,?,?)",
+            (self._key(cik), blob, datetime.now().isoformat(), concepts),
+        )
+        self._conn.commit()
+
+    def get(self, cik: str | int) -> dict:
+        import gzip
+        import json
+
+        row = self._conn.execute(
+            "SELECT facts FROM company_facts WHERE cik = ?", (self._key(cik),)
+        ).fetchone()
+        if not row:
+            return {}
+        return json.loads(gzip.decompress(row["facts"]).decode("utf-8"))
+
+    def count(self) -> int:
+        return int(self._conn.execute(
+            "SELECT COUNT(*) FROM company_facts").fetchone()[0])

@@ -29,6 +29,8 @@ PROFILES_DB = "profiles.db"
 #: resets is a Deflated Sharpe bar that resets, and the whole correction depends
 #: on the count being cumulative across runs.
 TRIALS_DB = "trials.db"
+#: Cached SEC XBRL company facts, one gzipped row per issuer.
+FACTS_DB = "facts.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -916,6 +918,75 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_ingest_fundamentals(args: argparse.Namespace) -> int:
+    """Cache XBRL company facts for every issuer we hold events on.
+
+    Measurement has to be offline: the SEC allows 8 requests a second, and
+    fetching inside a backtest would both take hours and make a result's
+    coverage depend on when it was run rather than on what was filed.
+
+    One request per issuer covers every concept and every period they have ever
+    reported, so this is a few thousand requests once, then incremental.
+    """
+    from .lock import SingleInstance
+    from .research.eventstore import EventStore
+    from .research.fundamentals import FactsCache, XbrlClient
+
+    # Shares the "ingest" lock: this hits the same SEC host under the same 10
+    # req/s ceiling as the EDGAR ingests, and two of them at once would breach
+    # it. `acquire` returns None and raises LockHeld, which `main` catches --
+    # writing `if not lock.acquire()` here would be true on every single run and
+    # the command would never execute.
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        store = EventStore(DEFAULT_STATE / EVENTS_DB)
+        cutoff = datetime.now(timezone.utc)
+        since = cutoff - timedelta(days=args.days)
+        ciks: list[str] = []
+        seen: set[str] = set()
+        for row in store.as_of(cutoff, kind=KIND_INSIDER, since=since):
+            cik = str(row["payload"].get("issuer_cik") or "").lstrip("0")
+            if cik and cik not in seen:
+                seen.add(cik)
+                ciks.append(cik)
+        store.close()
+        print(f"{len(ciks):,} distinct issuers in the last {args.days} days")
+
+        cache = FactsCache(DEFAULT_STATE / FACTS_DB)
+        client = XbrlClient()
+        deadline = time.monotonic() + args.max_minutes * 60 if args.max_minutes else None
+        fetched = skipped = failed = 0
+        for i, cik in enumerate(ciks):
+            if deadline and time.monotonic() > deadline:
+                print("time budget reached; the cache is incremental")
+                break
+            if not args.force and cache.has(cik):
+                skipped += 1
+                continue
+            try:
+                raw = client.company_facts(cik)
+            except Exception as exc:  # noqa: BLE001
+                # One unreachable issuer must not end the run. It stays
+                # uncached, so the next invocation retries it.
+                failed += 1
+                if failed <= 5:
+                    print(f"  CIK {cik}: {type(exc).__name__}: {exc}")
+                continue
+            if raw:
+                cache.put(cik, raw)
+                fetched += 1
+            if fetched and fetched % 250 == 0:
+                print(f"  {i + 1:,}/{len(ciks):,}  cached {fetched:,}", flush=True)
+
+        print(f"\nfetched {fetched:,}, already held {skipped:,}, failed {failed:,}")
+        print(f"cache now holds {cache.count():,} issuers")
+        cache.close()
+        return 0
+    finally:
+        lock.release()
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     """Run the backlog against the labelled event population.
 
@@ -1043,12 +1114,62 @@ def cmd_measure(args: argparse.Namespace) -> int:
         print(f"enriched in {time.monotonic() - started:.0f}s -- "
               f"{builder.summary()}")
 
+    # The other three data families. Each was blocked for one reason -- no path
+    # from the family to the payload -- and each is unblocked by the same shape
+    # of join. Every one is optional and silent when its store is absent, so a
+    # partial state produces fewer features rather than a crash.
+    if args.joins:
+        from .research.joins import (
+            FundamentalsJoin,
+            HoldingsJoin,
+            ProfileJoin,
+            enrich_all,
+        )
+
+        started = time.monotonic()
+        active = []
+
+        profiles_path = DEFAULT_STATE / PROFILES_DB
+        if profiles_path.exists():
+            from .research.intraday import ProfileStore
+            pstore = ProfileStore(profiles_path)
+            if pstore.count():
+                active.append(ProfileJoin(pstore, price_cache=cache, basis=basis))
+            else:
+                pstore.close()
+                print("profiles: store is empty; run backfill-intraday")
+        else:
+            print("profiles: no store yet; run backfill-intraday")
+
+        hstore = EventStore(events_path)
+        active.append(HoldingsJoin(hstore))
+
+        facts_path = DEFAULT_STATE / FACTS_DB
+        if facts_path.exists():
+            from .research.fundamentals import FactsCache
+            fcache = FactsCache(facts_path)
+            if fcache.count():
+                active.append(FundamentalsJoin(fcache, price_cache=cache,
+                                               basis=basis))
+            else:
+                fcache.close()
+                print("fundamentals: cache is empty; run ingest-fundamentals")
+        else:
+            print("fundamentals: no cache yet; run ingest-fundamentals")
+
+        payloads = enrich_all(payloads, labels, *active)
+        print(f"joined in {time.monotonic() - started:.0f}s")
+        for join in active:
+            print(f"  {join.summary()}")
+        hstore.close()
+
     costs = None
     if args.costs:
         costs = CostTable(cache, model=CostModel(), basis=basis)
 
     registry = TrialRegistry(DEFAULT_STATE / TRIALS_DB)
-    cands = all_candidates(with_features=args.features)
+    cands = all_candidates(with_features=args.features,
+                           with_joins=args.joins)
     runnable = sum(1 for c in cands if c.runnable)
     print(f"\nsweeping {runnable} candidates x {len(horizons)} horizons "
           f"= {runnable * len(horizons)} trials, on top of "
@@ -1253,12 +1374,26 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip indicator enrichment. Drops the indicator "
                          "candidates from the sweep entirely rather than "
                          "reporting them as zero-trade measurements")
+    ms.add_argument("--no-joins", dest="joins", action="store_false",
+                    help="skip the intraday, holdings and fundamentals joins. "
+                         "Their candidates then report zero trades, which reads "
+                         "as measured-and-empty rather than not-joined")
     ms.add_argument("--no-costs", dest="costs", action="store_false",
                     help="do not charge transaction costs. Every result is then "
                          "gross, and no gross result survives the cost gate by "
                          "default -- this is for diagnosing the sweep, not for "
                          "producing a finding")
-    ms.set_defaults(func=cmd_measure, features=True, costs=True)
+    ms.set_defaults(func=cmd_measure, features=True, costs=True, joins=True)
+
+    fnd = sub.add_parser("ingest-fundamentals",
+                         help="cache SEC XBRL company facts for held issuers")
+    fnd.add_argument("--days", type=int, default=PRICE_WINDOW_DAYS,
+                     help="how far back to collect issuers from the event store")
+    fnd.add_argument("--max-minutes", type=float, default=0,
+                     help="stop cleanly after N minutes; the cache is incremental")
+    fnd.add_argument("--force", action="store_true",
+                     help="refetch issuers already cached")
+    fnd.set_defaults(func=cmd_ingest_fundamentals)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)

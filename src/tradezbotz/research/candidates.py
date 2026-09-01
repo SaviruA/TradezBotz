@@ -191,37 +191,102 @@ def feature_candidates() -> list[Candidate]:
     return out
 
 
+#: Hypotheses served by `joins.py` rather than `features.py`. Same shape --
+#: a boolean written into the payload point-in-time -- but sourced from the
+#: intraday store, the holdings disclosures and the XBRL facts cache.
+#:
+#: These were the blocked list until the joins existed. Nothing about the
+#: hypotheses changed; the wiring did.
+JOIN_HYPOTHESES: tuple[tuple[str, str, str], ...] = (
+    ("above_poc",
+     "Price above the point of control -- the price at which the most volume "
+     "traded over the prior window. The Market Profile claim is that price is "
+     "drawn back toward accepted value.",
+     "no standalone edge; the interesting version is the interaction with an "
+     "insider buy, since 'insider bought while price sits above accepted "
+     "value' is a different statement from either half"),
+    ("below_value_area",
+     "Price below the band holding 70% of prior volume. The classic Market "
+     "Profile mean-reversion setup.",
+     "the one microstructure claim with a mechanism rather than a chart "
+     "pattern behind it, and still expected to lose to costs"),
+    ("in_low_volume_node",
+     "Price sitting where little volume traded. Profile theory says price "
+     "moves quickly through thin prices.",
+     "unknown. If it works it should work as a conditioner on speed of move, "
+     "not on direction"),
+    ("positive_delta",
+     "Net buyer-initiated volume over the prior window, at least 10% of total.",
+     "minute-bar delta agreed with tick-level Lee-Ready on sign only 1 time in "
+     "4, so a result here is about the proxy as much as about order flow"),
+    ("swept_low_intraday",
+     "Took out the prior 20-session low intraday and reclaimed it with real "
+     "session left -- the version of the sweep that the daily bar cannot "
+     "express.",
+     "expected to fail on the Osler evidence, and this is the only form of "
+     "the claim worth the trial: hours, not days, is the horizon it operates "
+     "on"),
+    ("congress_bought",
+     "A House member disclosed a purchase in the same name within 90 days, "
+     "matched on the FILING date, not the transaction date.",
+     "the individual-trade result in the literature was reversed twice "
+     "(Eggers & Hainmueller 2013, Belmont 2022); significance survives only "
+     "in an aggregate trade-weighted portfolio, which this is not"),
+    ("activist_stake",
+     "A 13D was filed on the name within 90 days. 13D means control intent, "
+     "unlike a passive 13G.",
+     "the strongest of the holdings signals if any of them work: 5 business "
+     "days of disclosure lag against 45 for a 13F"),
+    ("institution_added",
+     "A 13F disclosed a position change within 90 days.",
+     "no edge. The 45-day lag is most of a quarter, and whatever the filer "
+     "knew is public by the time we see it"),
+    ("profitable",
+     "Positive trailing twelve-month net income, from XBRL filtered on `filed`.",
+     "a quality conditioner rather than a signal. 74% of small filers fail it, "
+     "so it mostly selects the larger end of our universe"),
+)
+
+
+def join_candidates() -> list[Candidate]:
+    """Hypotheses reachable only once `joins.py` has enriched the payloads."""
+    out: list[Candidate] = []
+    for key, rationale, prior in JOIN_HYPOTHESES:
+        out.append(Candidate(key, _true(key), rationale, prior=prior))
+        out.append(Candidate(
+            f"buy + {key}",
+            all_of(_buy, _true(key)),
+            f"Open-market insider purchase conditioned on: {rationale}",
+            prior=f"pair test -- standalone prior was: {prior}",
+        ))
+    # Cheapness is a numeric cut rather than a flag, so these do not fit the
+    # loop above. Thresholds are conventional rather than fitted: a fitted
+    # threshold is a search, and a search that does not register its trials is
+    # the thing the whole apparatus exists to prevent.
+    out.append(Candidate(
+        "buy + cheap on sales",
+        all_of(_buy, lambda p, l: 0 < (p.get("price_to_sales") or 0) < 1.0),
+        "Open-market purchase where the company trades below one times "
+        "trailing revenue.",
+        prior="P/S below 1 on a microcap usually means distress rather than "
+              "value, so this may well be negative",
+    ))
+    out.append(Candidate(
+        "buy + growing revenue",
+        all_of(_buy, lambda p, l: (p.get("revenue_growth") or 0) > 0.10),
+        "Open-market purchase at a company growing revenue over 10% "
+        "year-on-year, both figures point-in-time from XBRL.",
+        prior="the most plausible fundamental pairing: an insider buying into "
+              "growth is a different statement from one buying a decline",
+    ))
+    return out
+
+
 #: Hypotheses we intend to measure and cannot yet. Each names the missing
 #: mechanism, not a judgement. These print in the report under "NOT measured --
 #: untested, not rejected", which is the only place the distinction survives.
 def blocked_candidates() -> list[Candidate]:
     return [
-        Candidate(
-            "volume profile: POC rejection", everything,
-            "Price rejected from the session's point of control, where the most "
-            "volume traded.",
-            prior="unknown -- this is the one microstructure claim with a "
-                  "mechanism rather than a chart pattern behind it",
-            blocked_by="intraday profiles exist in profiles.db but are not "
-                       "joined to labelled events; needs a FeatureBuilder "
-                       "equivalent reading ProfileStore",
-        ),
-        Candidate(
-            "intraday liquidity sweep", everything,
-            "The pattern traders actually describe: price takes out a prior "
-            "level, the reclaim happens quickly, and the sequence within the "
-            "session is what distinguishes a stop run from a genuine breakdown "
-            "that merely closed off its low.",
-            prior="expected to fail for the same reasons as the daily version, "
-                  "and worth measuring anyway because it is the only form of "
-                  "the claim that is actually the claim: Osler's hours-not-days "
-                  "horizon is the one this operates on",
-            blocked_by="the detector and its stored inputs now exist "
-                       "(microstructure.swept_low_intraday), but profiles.db is "
-                       "not joined to labelled events -- the same missing join "
-                       "as volume profile, needing a FeatureBuilder equivalent "
-                       "that reads ProfileStore and the prior daily level",
-        ),
         Candidate(
             "order flow imbalance", everything,
             "Aggressor-side imbalance from trades and quotes.",
@@ -249,19 +314,15 @@ def blocked_candidates() -> list[Candidate]:
                        "universe is near zero. Not backfillable",
         ),
         Candidate(
-            "congressional copy", everything,
-            "Buy alongside a disclosed House PTR purchase.",
-            prior="the aggregate trade-weighted result in the literature is "
-                  "weak and the individual-trade result was reversed twice",
-            blocked_by="House PTRs are ingested but not joined to the labelled "
-                       "event population; needs the disclosure-lag-aware join",
-        ),
-        Candidate(
-            "13F filer persistence", everything,
-            "Follow filers whose position changes persist across quarters.",
-            prior="the 45-day lag probably removes whatever was there",
-            blocked_by="persistence gate has not been run over enough ingested "
-                       "quarters to rank filers",
+            "13F filer persistence ranking", everything,
+            "Follow only those filers whose position changes persist across "
+            "quarters, rather than every 13F filer.",
+            prior="the 45-day lag probably removes whatever was there; the "
+                  "ranked version is the only one worth the trial",
+            blocked_by="`institution_added` is now measurable, but RANKING "
+                       "filers needs `holdings.persistence` run across "
+                       "consecutive quarters, and the store does not yet hold "
+                       "enough of them",
         ),
         # --- the large-cap valuation track -----------------------------------
         #
@@ -320,23 +381,23 @@ def blocked_candidates() -> list[Candidate]:
                        "the same lookahead that rules out Yahoo for reported "
                        "figures. A vendor problem, not a data-availability one",
         ),
-        Candidate(
-            "P/S with growth", everything,
-            "Sales multiple against sales growth, on XBRL facts filtered by "
-            "their `filed` date.",
-            prior="value screens on microcaps mostly select distress",
-            blocked_by="XBRL facts are not joined to events; needs a "
-                       "point-in-time join on `filed`",
-        ),
     ]
 
 
-def all_candidates(*, with_features: bool = True) -> list[Candidate]:
-    """The full backlog. `with_features=False` drops the indicator hypotheses,
-    for a run where feature enrichment was skipped -- they would otherwise all
-    report zero trades, which reads like a measurement and is not one."""
+def all_candidates(*, with_features: bool = True,
+                   with_joins: bool = True) -> list[Candidate]:
+    """The full backlog.
+
+    `with_features=False` drops the indicator hypotheses and `with_joins=False`
+    the intraday/holdings/fundamentals ones, for runs where that enrichment was
+    skipped. Dropping them is not the same as leaving them in to report zero
+    trades: a zero-trade row reads as "measured, nothing there", and these were
+    never measured.
+    """
     out = insider_candidates()
     if with_features:
         out += feature_candidates()
+    if with_joins:
+        out += join_candidates()
     out += blocked_candidates()
     return out
