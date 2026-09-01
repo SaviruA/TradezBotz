@@ -20,13 +20,16 @@ on:
     inputs:
       ingest_minutes:
         description: "Minutes to spend pulling EDGAR filings"
-        default: "135"
+        default: "60"
       backfill_symbols:
         description: "Symbols to price-backfill this run"
         default: "4000"
       requeue:
         description: "Refetch symbols already marked done (after a vendor or basis change)"
         default: "false"
+      intraday_days:
+        description: "Days of intraday history to reduce. 180 keeps steady state; raise it to deepen coverage toward the 3800-day labelling window"
+        default: "180"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -41,25 +44,32 @@ jobs:
     runs-on: ubuntu-latest
     # Well under the 6h hard cap so the state save always gets to run.
     #
-    # Step budgets must fit inside this alongside the two unbudgeted steps. They
-    # did not: 150 + 45 + 45 + 60 explicit, plus ~49 for a full backfill and ~10
-    # for crosscheck, came to ~359 against a 330 ceiling -- so the tail steps
-    # would have been cut. Filings and intraday trimmed to 25 and 30; both are
-    # checkpointed and resume, so the cost is slower catch-up, not lost work.
+    # Budgets are set from MEASURED step times, not from summed ceilings.
     #
-    # Current arithmetic, after adding the fundamentals cache and measure:
+    # They were not, and that was the bug. The old arithmetic added every
+    # step's budget as though all of them would bind at once -- 150 + 45 + 45 +
+    # 60 came to ~359 against 330, so steps got trimmed to fit. But a budget is
+    # a ceiling, not a cost, and most steps finish nowhere near theirs. Measured
+    # on the 2026-08-31 run:
     #
-    #   bulk 135 + edgar 45 + filings 25 + holdings 20 + fundamentals 12
-    #   + intraday 15 + measure 10                        = 262 budgeted
-    #   + backfill ~49 + crosscheck ~10 + sentiment ~1     = ~322
+    #   bulk archives     21.8m of 150   (15%)
+    #   current quarter   15.1m of  45   (34%)
+    #   8-K / 424B         0.5m of  25   ( 2%)
+    #   intraday          51.5m
+    #   backfill          39.7m
+    #   everything else    5.1m
+    #   ------------------------------
+    #   TOTAL            133.7m of 330   -- 196 minutes, 59% of the job, idle
     #
-    # against 330. Nine minutes of slack, which is tight on purpose: the bulk
-    # archive step is the one paying for it, and it is temporary pressure --
-    # only spent while the deeper 4895-day window loads its uncached quarters.
-    # Once cached it returns to seconds and roughly two hours free up. It came
-    # down from 150 to 135 to fund the fundamentals cache; if a run starts
-    # getting cut at the tail, take it from there again rather than from a step
-    # that is not checkpointed.
+    # Trimming intraday to 15 minutes to "make room" was therefore taking from
+    # the one step that could use the time, to fund headroom that was never
+    # consumed. The allocation below gives the slack to the step whose work
+    # actually scales, and leaves ~60 minutes of genuine buffer.
+    #
+    # Two steps keep generous budgets despite finishing fast: bulk archives
+    # spikes when a quarter is uncached, and the current-quarter ingest grows
+    # through each quarter. Both are checkpointed, so overrunning costs a slower
+    # catch-up rather than lost work.
     timeout-minutes: 330
 
     steps:
@@ -122,14 +132,14 @@ jobs:
             --timed \
             --days 4895 \
             --before "$(date -u -d '1 day' +%Y-%m-%d)" \
-            --max-minutes "${{ github.event.inputs.ingest_minutes || 135 }}"
+            --max-minutes "${{ github.event.inputs.ingest_minutes || 60 }}"
 
       # Bulk archives only exist through the last completed quarter, so the
       # current quarter still needs the per-filing path. Structural, not a bug.
       - name: Ingest current quarter (per-filing)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
-        run: python -m tradezbotz ingest-edgar --days 100 --max-minutes 45
+        run: python -m tradezbotz ingest-edgar --days 100 --max-minutes 30
 
       # 8-K and 424B. These exist because news does not cover our universe:
       # NVDA drew 200+ articles in a month while XELB and ARI drew zero, yet
@@ -140,7 +150,7 @@ jobs:
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          python -m tradezbotz ingest-filings --days 400 --max-minutes 25
+          python -m tradezbotz ingest-filings --days 400 --max-minutes 15
 
       # 13F holdings, 13D/G stakes, and House congressional trades. Operating
       # companies file 13F too -- NVIDIA has 11 on file -- so "NVIDIA took a
@@ -204,7 +214,8 @@ jobs:
           ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
         run: |
           python -m tradezbotz backfill-intraday \
-            --days 180 --minutes 15 --batch 50
+            --days "${{ github.event.inputs.intraday_days || 180 }}" \
+            --minutes 120 --batch 50
 
       # XBRL company facts, one request per issuer covering every concept and
       # period they have ever reported. Measurement has to be offline -- the SEC
@@ -218,7 +229,7 @@ jobs:
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          python -m tradezbotz ingest-fundamentals --max-minutes 12
+          python -m tradezbotz ingest-fundamentals --max-minutes 20
 
       - name: Status
         run: python -m tradezbotz status
@@ -243,7 +254,7 @@ jobs:
       # sweep reporting a thin population is exactly what it is for.
       - name: Measure the candidate backlog
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           python -m tradezbotz measure --limit 40000
 
