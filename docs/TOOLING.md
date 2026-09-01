@@ -14,6 +14,7 @@ re-litigated every few months.
 | Trading-R1 | refused | unstated |
 | OpenAlice | refused, redundant | AGPL-3.0 |
 | paperclip | refused, out of scope | MIT |
+| worldmonitor | refused as a data source; possible ops surface later | AGPL-3.0 |
 
 ---
 
@@ -145,3 +146,62 @@ primitive, when we reach live trading.
 
 Multi-agent orchestration for running a business. Not a trading tool; no overlap
 with anything here beyond both involving agents.
+
+---
+
+## worldmonitor — refused as a data source
+
+Evaluated 2026-09-01. [koala73/worldmonitor](https://github.com/koala73/worldmonitor),
+AGPL-3.0, TypeScript.
+
+**The community backing is real and was worth checking rather than assuming.**
+85,288 stars, 12,841 forks, 494 watchers, pushed the same day it was evaluated,
+a dozen-plus human contributors, SDKs on npm / PyPI / RubyGems / pkg.go.dev, an
+MCP server and an active Discord. This is not a hobby repository.
+
+**It is a dashboard, not a data source, and that distinction decides it.** The
+market data is aggregated from upstream vendors we already have opinions about:
+
+    query1.finance.yahoo.com   Yahoo -- already our third crosscheck referee,
+                               price-only and restated, never a returns source
+    finnhub.io                 the insider, earnings and profile endpoints
+    alphavantage.co            quotes
+    api.coingecko.com          crypto
+
+Four specific reasons it cannot feed a backtest here:
+
+**1. Its insider data filters on the wrong date.** `get-insider-transactions.ts`
+cuts its six-month window on `tx.transactionDate` -- when the insider traded --
+not on when the filing was disseminated. For a live "recent insider activity"
+panel that is the right choice. For a backtest it is precisely the lookahead
+this system is built to prevent, and it would be inherited silently.
+
+**2. It is a derived source where we already hold the primary.** Its insider
+feed is Finnhub's, and Finnhub's is the SEC's. We ingest EDGAR directly and get
+the `filed` date, which is the whole basis of `observed_at`.
+
+**3. There is no history.** Cache TTLs across the market service run from 60
+seconds to 90 days. It is a cache, not an archive. Our labelling window is 3,800
+days, and a real-time feed can only ever be accumulated forward -- the same
+structural limit already recorded against ApeWisdom.
+
+**4. The analysis is LLM-generated.** `analyze-stock.ts` is model-backed, which
+runs into the standing refusal on LLM output reaching a backtest: the lookahead
+lives in the weights, where no audit of the data path can find it.
+
+**Licence.** AGPL-3.0 with the network clause. This repository is public and
+currently carries no licence of its own, so adopting worldmonitor code would be
+a decision to license this system AGPL rather than a blocker -- but it is a
+decision, not a detail.
+
+**What is genuinely novel in it**, and unavailable to us elsewhere: COT
+positioning, ETF flows, the Country Instability Index, physical premiums. All of
+it is real alternative data. None of it is archived point-in-time, none covers
+microcaps, and each would need years of forward accumulation before it could be
+tested. That is a reason to note them, not to adopt the platform.
+
+**What would reverse this:** a live deployment needing an operational monitoring
+surface. Watching positions and geopolitical context in real time is a different
+job from research, it has no point-in-time requirement, and worldmonitor is a
+strong candidate for it. We have nothing deployed, so that job does not exist
+yet.
