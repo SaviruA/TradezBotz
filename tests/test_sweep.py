@@ -12,10 +12,16 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from tradezbotz.research.backtest import BacktestResult, everything, field_equals
+from tradezbotz.research.backtest import (
+    BacktestResult,
+    all_of,
+    everything,
+    field_equals,
+)
 from tradezbotz.research.labeler import Coverage, Label
 from tradezbotz.research.sweep import (
     Candidate,
+    SweepError,
     Verdict,
     judge,
     priors_vs_outcomes,
@@ -227,3 +233,118 @@ def test_an_unmeasured_prior_is_flagged():
 
     assert "NOT MEASURED" in text
     assert "stands unchecked" in text
+
+
+# --- the holdout guard ------------------------------------------------------------
+
+def test_sweeping_the_holdout_is_refused_without_a_declared_finalist(reg):
+    """`splits.Split` seals the holdout behind `unlock_holdout`, which records
+    the access. Nothing connected that seal to the sweep: passing
+    partition="holdout" measured it with no access logged at all."""
+    labels, payloads = dataset()
+    cands = [Candidate("a", everything, "r"), Candidate("b", everything, "r")]
+
+    with pytest.raises(SweepError) as exc:
+        sweep(cands, labels, payloads, registry=reg, partition="holdout")
+
+    assert "no recorded access" in str(exc.value)
+    assert "unlock_holdout" in str(exc.value)
+
+
+def test_the_refused_holdout_sweep_measures_nothing_at_all(reg):
+    """The check runs before any measurement. A sweep that would have touched
+    the holdout improperly must touch none of it, not the first half."""
+    labels, payloads = dataset()
+    cands = [Candidate("declared", everything, "r"),
+             Candidate("undeclared", everything, "r")]
+    reg.record_holdout_access("declared", "finalist")
+
+    with pytest.raises(SweepError):
+        sweep(cands, labels, payloads, registry=reg, partition="holdout")
+
+    assert reg.count() == 0
+
+
+def test_the_holdout_opens_once_every_candidate_is_declared(reg):
+    labels, payloads = dataset()
+    cands = [Candidate("a", everything, "r", controlled=False)]
+    reg.record_holdout_access("a", "declared finalist after the train sweep")
+
+    out = sweep(cands, labels, payloads, registry=reg, horizons=(5,),
+                partition="holdout")
+
+    assert len(out) == 1
+    assert reg.get(out[0].result.trial_id).split == "holdout"
+
+
+def test_train_and_validation_need_no_declaration(reg):
+    labels, payloads = dataset()
+    cands = [Candidate("a", everything, "r", controlled=False)]
+
+    for partition in ("train", "validation"):
+        out = sweep(cands, labels, payloads, registry=reg, horizons=(5,),
+                    partition=partition)
+        assert len(out) == 1
+
+
+# --- controls ---------------------------------------------------------------------
+
+def test_a_selector_that_admits_everything_gets_no_control(reg):
+    """The bug this replaces: the check was `cand.selector is not everything`,
+    an identity test that only recognised the literal baseline function. Any
+    equivalent selector -- a lambda, a wrapper, a filter every event happens to
+    pass -- slipped through and had a control run against an empty complement.
+    """
+    labels, payloads = dataset()
+    admits_all = all_of(everything)          # not `everything` by identity
+    cands = [Candidate("wrapped", admits_all, "r")]
+
+    out = sweep(cands, labels, payloads, registry=reg, horizons=(5,))
+
+    assert out[0].control is None
+    assert "below the" in out[0].control_note
+
+
+def test_an_empty_control_does_not_consume_trial_budget(reg):
+    """Not cosmetic. Every registered trial raises the Deflated Sharpe bar for
+    every other candidate, so a control that could never have said anything
+    makes real findings harder to establish in exchange for nothing."""
+    labels, payloads = dataset()
+
+    sweep([Candidate("wrapped", all_of(everything), "r")], labels, payloads,
+          registry=reg, horizons=(5,))
+
+    assert reg.count() == 1
+
+
+def test_a_real_selector_still_gets_its_control(reg):
+    labels, payloads = dataset()
+    cands = [Candidate("buys", field_equals("code", "P"), "r")]
+
+    out = sweep(cands, labels, payloads, registry=reg, horizons=(5,))
+
+    assert out[0].control is not None
+    assert out[0].control.n_trades > 0
+    assert out[0].control_note == ""
+
+
+def test_controlled_false_skips_the_control_and_says_so(reg):
+    labels, payloads = dataset()
+    cands = [Candidate("baseline", everything, "r", controlled=False)]
+
+    out = sweep(cands, labels, payloads, registry=reg, horizons=(5,))
+
+    assert out[0].control is None
+    assert out[0].control_note == "control not meaningful for this candidate"
+    assert reg.count() == 1
+
+
+def test_the_report_distinguishes_no_control_from_a_matching_control(reg):
+    """An empty control column reads as 'no control needed' unless it says
+    otherwise, and those are opposite claims."""
+    labels, payloads = dataset()
+    cands = [Candidate("baseline", everything, "r", controlled=False)]
+
+    text = report(sweep(cands, labels, payloads, registry=reg, horizons=(5,)))
+
+    assert "ran without a control" in text

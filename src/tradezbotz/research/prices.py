@@ -686,3 +686,39 @@ class DualBasisSource:
         for basis in BASES:
             out[basis] = self.sources[basis].daily_bars(symbol, start, end)
         return out[self.primary]
+
+
+class CachedOnlySource:
+    """Serves bars from the local cache and never reaches a vendor.
+
+    Measurement must be reproducible and must not depend on network access,
+    vendor credentials, or a rate limiter. A source that silently fetches on a
+    miss would also make a backtest's coverage depend on when it was run, which
+    turns "this strategy had 40% coverage" into a statement about the weather.
+
+    A miss returns an empty `Series` rather than raising. That is the honest
+    result: the labeller reads it as NO_DATA and the coverage report says how
+    much of the population was unmeasurable, which is exactly the number a
+    reader needs.
+    """
+
+    def __init__(self, cache: PriceCache, basis: str = BASIS_TOTAL) -> None:
+        self.cache = cache
+        self.basis = basis
+        self.hits = 0
+        self.misses = 0
+
+    def daily_bars(self, symbol: str, start: date, end: date) -> Series:
+        series = self.cache.get(symbol, start, end, basis=self.basis)
+        if series.bars:
+            self.hits += 1
+        else:
+            self.misses += 1
+        return series
+
+    def summary(self) -> str:
+        total = self.hits + self.misses
+        return (
+            f"price cache ({self.basis}): {self.hits:,} of {total:,} symbols "
+            f"served, {self.misses:,} absent"
+        )

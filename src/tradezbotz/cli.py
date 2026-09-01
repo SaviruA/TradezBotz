@@ -24,6 +24,11 @@ EVENTS_DB = "events.db"
 BARS_DB = "bars.db"
 CHECKPOINT_DB = "backfill.db"
 PROFILES_DB = "profiles.db"
+#: Append-only log of every backtest ever run against this dataset. It lives in
+#: the encrypted state blob with everything else, because a trial count that
+#: resets is a Deflated Sharpe bar that resets, and the whole correction depends
+#: on the count being cumulative across runs.
+TRIALS_DB = "trials.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -894,6 +899,171 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_measure(args: argparse.Namespace) -> int:
+    """Run the backlog against the labelled event population.
+
+    This is the command everything else exists to feed, and it did not exist.
+    Every module below it was built and tested -- the labeller, the cost model,
+    the clustering corrections, the trial registry, the sweep -- and nothing
+    called them together, so the honest description of the project's state was
+    not "nothing has been measured yet because coverage is thin". It was "there
+    is no code path that measures anything".
+
+    Five stages, each of which can fail loudly rather than quietly degrading:
+
+      load      events the store says were knowable at the cutoff
+      split     chronologically; the holdout stays sealed unless declared
+      label     forward returns from cached bars only, never a live fetch
+      enrich    point-in-time indicator values, evaluated before the entry bar
+      sweep     every candidate at every horizon, with costs charged per trade
+    """
+    from .research.candidates import all_candidates
+    from .research.costs import CostModel, CostTable
+    from .research.eventstore import EventStore
+    from .research.features import FeatureBuilder
+    from .research.labeler import Labeller, coverage_report
+    from .research.prices import BASIS_PRICE, BASIS_TOTAL, CachedOnlySource, PriceCache
+    from .research.splits import chronological_split, filter_events
+    from .research.sweep import DEFAULT_HORIZONS, SweepError, priors_vs_outcomes
+    from .research.sweep import report as sweep_report
+    from .research.sweep import sweep
+    from .research.trials import TrialRegistry
+
+    events_path = DEFAULT_STATE / EVENTS_DB
+    bars_path = DEFAULT_STATE / BARS_DB
+    for path, what in ((events_path, "event store"), (bars_path, "price cache")):
+        if not path.exists():
+            print(f"no {what} at {path}; run the ingest and backfill first",
+                  file=sys.stderr)
+            return 2
+
+    cutoff = args.as_of or datetime.now(timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    window_start = cutoff - timedelta(days=args.window)
+
+    horizons = tuple(int(h) for h in args.horizons.split(",") if h.strip())
+    if not horizons:
+        horizons = DEFAULT_HORIZONS
+
+    store = EventStore(events_path)
+    rows = list(store.as_of(cutoff, kind=args.kind, since=window_start))
+    store.close()
+    print(f"{len(rows):,} {args.kind} events knowable at {cutoff.date()} "
+          f"within {args.window} days")
+    if not rows:
+        print("nothing to measure", file=sys.stderr)
+        return 1
+
+    # Split the range the data actually covers, not the range that was asked
+    # for. Splitting the request instead is degenerate whenever ingestion has
+    # not caught up with it: asking for 3800 days against a store holding two
+    # years of recent filings put every single event in the holdout and left
+    # train empty, which reads like "no events" rather than "the window is
+    # wrong".
+    #
+    # The cost is that the boundaries move as history accumulates, so "train"
+    # is not the same set between runs. That is tolerable for train and
+    # validation and is NOT tolerable for the holdout, which is why
+    # --split-start and --split-end exist: pin them before declaring a finalist,
+    # and the sealed window stops drifting under it.
+    observed = [datetime.fromisoformat(r["observed_at"]) for r in rows]
+    split_start = args.split_start or min(observed).date()
+    split_end = args.split_end or max(observed).date()
+    split = chronological_split(split_start, split_end)
+    print(split.describe())
+    if not (args.split_start and args.split_end):
+        print("  (boundaries derived from the data range; pin them with "
+              "--split-start/--split-end before any holdout work)")
+
+    rows = filter_events(rows, split, args.partition)
+    print(f"{len(rows):,} in the {args.partition} partition")
+    if not rows:
+        print(f"no events in the {args.partition} partition", file=sys.stderr)
+        return 1
+    if args.limit:
+        # Head, not a sample: the split is chronological and taking a random
+        # subset would scatter the trades across the window while claiming the
+        # sample size of a contiguous one.
+        rows = rows[: args.limit]
+        print(f"limited to the first {len(rows):,}")
+
+    events = [
+        {"symbol": r["symbol"], "observed_at": r["observed_at"]} for r in rows
+    ]
+    payloads = [r["payload"] for r in rows]
+
+    basis = BASIS_TOTAL if args.basis == "total" else BASIS_PRICE
+    cache = PriceCache(bars_path)
+    source = CachedOnlySource(cache, basis=basis)
+
+    started = time.monotonic()
+    labels = Labeller(source, horizons=horizons).label(events)
+    print(f"labelled in {time.monotonic() - started:.0f}s -- {source.summary()}")
+
+    cov = coverage_report(labels)
+    print("coverage: " + ", ".join(f"{k}={v}" for k, v in cov.items()))
+
+    # The specific trap this catches: the default basis is total-return on the
+    # merits, but a cache filled before the dual-basis change holds price-only
+    # bars. Every symbol then misses, coverage collapses, and the sweep reports
+    # "too few trades" across the board -- which looks like a finding about the
+    # strategies and is a finding about the cache.
+    other = BASIS_PRICE if basis == BASIS_TOTAL else BASIS_TOTAL
+    held, held_other = len(cache.symbols(basis)), len(cache.symbols(other))
+    if held_other > held * 2:
+        print(f"\nWARNING: the cache holds {held:,} symbols on the {basis} basis "
+              f"and {held_other:,} on {other}. This run is measuring the thinner "
+              f"one.\n  Either pass --basis {other}, or refill with "
+              f"`backfill --requeue`, which is what makes 'done' mean both "
+              f"bases.\n  Low coverage below is about the cache, not about the "
+              f"strategies.")
+
+    if args.features:
+        started = time.monotonic()
+        builder = FeatureBuilder(cache, basis=basis)
+        payloads = builder.enrich(payloads, labels)
+        print(f"enriched in {time.monotonic() - started:.0f}s -- "
+              f"{builder.summary()}")
+
+    costs = None
+    if args.costs:
+        costs = CostTable(cache, model=CostModel(), basis=basis)
+
+    registry = TrialRegistry(DEFAULT_STATE / TRIALS_DB)
+    cands = all_candidates(with_features=args.features)
+    runnable = sum(1 for c in cands if c.runnable)
+    print(f"\nsweeping {runnable} candidates x {len(horizons)} horizons "
+          f"= {runnable * len(horizons)} trials, on top of "
+          f"{registry.count()} already registered")
+
+    try:
+        assessments = sweep(
+            cands, labels, payloads, registry=registry, horizons=horizons,
+            costs=costs, partition=args.partition,
+        )
+    except SweepError as exc:
+        print(str(exc), file=sys.stderr)
+        registry.close()
+        cache.close()
+        return 2
+
+    print()
+    print(sweep_report(assessments, cands))
+    print()
+    if costs is not None:
+        print(costs.summary())
+    else:
+        print("UNCOSTED: --no-costs was passed. Gross returns only, and a gross "
+              "edge on this universe is not a result.")
+    print()
+    print(priors_vs_outcomes(assessments, cands))
+
+    registry.close()
+    cache.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tradezbotz")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1026,6 +1196,47 @@ def build_parser() -> argparse.ArgumentParser:
     hld.add_argument("--max-minutes", type=int, default=0)
     hld.add_argument("--force", action="store_true")
     hld.set_defaults(func=cmd_ingest_holdings)
+
+    ms = sub.add_parser("measure",
+                        help="run the whole candidate backlog against labelled "
+                             "events and print the verdicts")
+    ms.add_argument("--as-of", type=datetime.fromisoformat,
+                    help="point-in-time cutoff; nothing observed after this is "
+                         "visible. Defaults to now")
+    ms.add_argument("--window", type=int, default=PRICE_WINDOW_DAYS,
+                    help=f"days of history to measure over (default "
+                         f"{PRICE_WINDOW_DAYS}, the price window)")
+    ms.add_argument("--kind", default=KIND_INSIDER,
+                    help="event kind to measure (default insider_transaction)")
+    ms.add_argument("--partition", default="train",
+                    choices=("train", "validation", "holdout"),
+                    help="holdout is refused unless every candidate has a "
+                         "recorded unlock; that is deliberate")
+    ms.add_argument("--split-start", type=date.fromisoformat,
+                    help="pin the split's first day. Without it the boundaries "
+                         "follow the data and move as history accumulates, "
+                         "which a sealed holdout cannot tolerate")
+    ms.add_argument("--split-end", type=date.fromisoformat,
+                    help="pin the split's last day")
+    ms.add_argument("--horizons", default="1,5,20",
+                    help="comma-separated holding periods in sessions")
+    ms.add_argument("--basis", choices=("total", "price"), default="total",
+                    help="adjustment basis; total-return is the default because "
+                         "a price-only series fabricates a loss on every "
+                         "ex-dividend date")
+    ms.add_argument("--limit", type=int, default=0,
+                    help="cap events measured, taken chronologically from the "
+                         "start of the partition")
+    ms.add_argument("--no-features", dest="features", action="store_false",
+                    help="skip indicator enrichment. Drops the indicator "
+                         "candidates from the sweep entirely rather than "
+                         "reporting them as zero-trade measurements")
+    ms.add_argument("--no-costs", dest="costs", action="store_false",
+                    help="do not charge transaction costs. Every result is then "
+                         "gross, and no gross result survives the cost gate by "
+                         "default -- this is for diagnosing the sweep, not for "
+                         "producing a finding")
+    ms.set_defaults(func=cmd_measure, features=True, costs=True)
 
     st = sub.add_parser("status", help="show pipeline state")
     st.set_defaults(func=cmd_status)

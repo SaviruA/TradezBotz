@@ -12,6 +12,35 @@ Status values:
 | `blocked` | cannot be computed from data we hold; the blocker is named |
 | `planned` | agreed, not yet written |
 
+## This table is now executable
+
+`research/candidates.py` is the machine-readable half of this document, and
+`python -m tradezbotz measure` runs it. Every row that reaches a backtest has a
+`Candidate` there carrying its rationale, its recorded prior, and — where it
+cannot run — the named blocker, which prints in the report under *"NOT measured
+— untested, not rejected"*.
+
+Keeping the two in sync is manual and that is a known weakness. The mitigation
+is that the code side is the one that runs: a hypothesis in this table with no
+`Candidate` is never measured, while a `Candidate` missing from this table is
+still measured and still reported.
+
+**`built` never meant reachable.** For most of this project's life, every
+function in the tables below was written and unit-tested, and *no code path
+called any of them from a backtest*. Twenty-odd indicators, a cost model, a
+clustering correction and a trial registry all worked in isolation and were
+never once run together. The gap was invisible precisely because each piece was
+individually green. `measure` is the wiring; the honest reading of every earlier
+"nothing has been measured yet" is that there was nothing to measure *with*.
+
+**Indicators reach a selector through the payload.** A `Selector` is
+`(payload, label) -> bool` and never sees bars, so `research/features.py`
+computes each indicator once per (symbol, entry day) and writes the answer into
+the payload. It evaluates on bars strictly **before** the entry session, because
+the entry session's own close is not knowable when we buy its open — reading
+indicators on the entry bar would produce a strong, entirely fictitious edge on
+every momentum feature at once.
+
 **Every row costs trial budget.** Each entry below, individually and in each
 pair, is one trial in the Deflated Sharpe denominator. Roughly 20 singles plus
 their pairs is several hundred trials, and our own noise simulation produced a

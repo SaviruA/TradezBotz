@@ -32,10 +32,10 @@ trial count and dependence are accounted for.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from .backtest import BacktestResult, Selector, everything, negate, run
+from .backtest import BacktestResult, Selector, negate, run
 from .labeler import Label
 from .trials import TrialRegistry
 
@@ -60,6 +60,10 @@ class Candidate:
     #: because the idea looks weak. The reason is required and is printed in the
     #: report, so an omission is visible rather than silent.
     blocked_by: str = ""
+    #: Whether a complement control means anything for this candidate. False for
+    #: a baseline that already selects everything: its complement is the empty
+    #: set, so the "control" would be a registered trial measuring nothing.
+    controlled: bool = True
 
     @property
     def runnable(self) -> bool:
@@ -85,6 +89,11 @@ class Assessment:
     result: BacktestResult
     control: BacktestResult | None
     verdict: str
+    #: Why no control was run, when none was. Empty when one was run or when
+    #: controls were switched off for the whole sweep. Recorded because "the
+    #: control was not run" and "the control was run and matched" are opposite
+    #: readings of the same blank column.
+    control_note: str = ""
 
     @property
     def kept(self) -> bool:
@@ -97,6 +106,49 @@ CONTROL_TOLERANCE = 0.7
 
 #: Below this many trades the statistics say nothing, whatever they print.
 MIN_TRADES = 30
+
+#: Partition name for the sealed out-of-sample window. Matched by string because
+#: that is what `run` records on the trial, and a typo here should fail loudly
+#: rather than quietly sweeping the holdout under a name nothing guards.
+HOLDOUT = "holdout"
+
+
+class SweepError(RuntimeError):
+    pass
+
+
+def _require_holdout_declared(candidates: Sequence[Candidate],
+                              registry: TrialRegistry) -> None:
+    """Refuse a holdout sweep for anything not already declared a finalist.
+
+    `splits.Split` seals the holdout behind `unlock_holdout`, which records the
+    access per hypothesis. Nothing connected that seal to the sweep: passing
+    `partition="holdout"` measured the holdout and recorded trials against it
+    with no access logged at all, which is the exact failure the split exists to
+    prevent -- and worse than peeking manually, because a sweep touches every
+    candidate at once.
+
+    Requiring a per-candidate declaration is the point. The holdout can answer
+    "does this specific finalist hold up", once. It cannot answer "which of my
+    forty candidates works", because that question is selection, and running it
+    here consumes the only clean data left.
+    """
+    undeclared = [
+        c.name for c in candidates
+        if c.runnable and registry.holdout_accesses(c.name) == 0
+    ]
+    if not undeclared:
+        return
+    shown = ", ".join(undeclared[:5])
+    more = f" (+{len(undeclared) - 5} more)" if len(undeclared) > 5 else ""
+    raise SweepError(
+        f"refusing to sweep the holdout: {len(undeclared)} candidates have no "
+        f"recorded access -- {shown}{more}. Declare each finalist first with "
+        "Split.unlock_holdout(registry, name, reason). If that feels like too "
+        "much friction for the number of candidates involved, that is the "
+        "signal: the holdout is for confirming a finalist, not for selecting "
+        "among a backlog."
+    )
 
 
 def judge(result: BacktestResult, control: BacktestResult | None) -> str:
@@ -142,7 +194,16 @@ def sweep(
 
     Blocked candidates are skipped but reported, so the difference between
     "tested and failed" and "never tested" stays visible in the output.
+
+    Sweeping the holdout is refused unless every candidate in it has already
+    been declared a finalist through `splits.unlock_holdout`. The check runs
+    before any measurement, so a sweep that would have touched the holdout
+    improperly touches none of it.
     """
+    if partition == HOLDOUT:
+        _require_holdout_declared(candidates, registry)
+
+    pairs = list(zip(payloads, labels))
     out: list[Assessment] = []
     for cand in candidates:
         if not cand.runnable:
@@ -154,18 +215,39 @@ def sweep(
                 registry=registry, selector=cand.selector,
                 horizon=horizon, partition=partition, costs=costs,
             )
-            control = None
-            if with_controls and cand.selector is not everything:
-                control = run(
-                    labels, payloads,
-                    hypothesis=f"{cand.name} [control]",
-                    rationale=f"complement of {cand.name}; if this performs "
-                              "equally the edge belongs to the population",
-                    registry=registry, selector=negate(cand.selector),
-                    horizon=horizon, partition=partition, costs=costs,
+            control, note = None, ""
+            if with_controls and cand.controlled:
+                # Count the complement before running it. An empty or tiny
+                # complement is not a control that failed, it is a control that
+                # could never have said anything -- and running it anyway would
+                # register a trial, raising the Deflated Sharpe bar for every
+                # other candidate in exchange for no information.
+                #
+                # This replaces an `is not everything` identity test, which only
+                # recognised the literal baseline function and missed any
+                # selector that happens to admit everything -- `all_of(buy)`
+                # where every event is a buy, say.
+                complement = negate(cand.selector)
+                n_complement = sum(
+                    1 for p, lab in pairs
+                    if horizon in lab.returns and complement(p, lab)
                 )
+                if n_complement >= MIN_TRADES:
+                    control = run(
+                        labels, payloads,
+                        hypothesis=f"{cand.name} [control]",
+                        rationale=f"complement of {cand.name}; if this performs "
+                                  "equally the edge belongs to the population",
+                        registry=registry, selector=negate(cand.selector),
+                        horizon=horizon, partition=partition, costs=costs,
+                    )
+                else:
+                    note = (f"complement holds {n_complement} trades, below the "
+                            f"{MIN_TRADES} floor; no control run")
+            elif with_controls:
+                note = "control not meaningful for this candidate"
             out.append(Assessment(cand.name, horizon, result, control,
-                                  judge(result, control)))
+                                  judge(result, control), note))
     return out
 
 
@@ -199,6 +281,17 @@ def report(assessments: Sequence[Assessment],
     lines.append("")
     lines.append(f"{len(kept)} of {len(assessments)} measurements survived "
                  f"every gate.")
+
+    # A missing control reads as "no control needed" unless it says otherwise,
+    # and those are opposite claims about the same empty column.
+    uncontrolled = [a for a in assessments if a.control is None and a.control_note]
+    if uncontrolled:
+        lines.append("")
+        lines.append(f"{len(uncontrolled)} measurements ran without a control:")
+        for a in uncontrolled[:10]:
+            lines.append(f"  {a.name[:28]:<30}h={a.horizon:<3} {a.control_note}")
+        if len(uncontrolled) > 10:
+            lines.append(f"  ... and {len(uncontrolled) - 10} more")
 
     blocked = [c for c in candidates if not c.runnable]
     if blocked:

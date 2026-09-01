@@ -368,3 +368,110 @@ def compare_spread_estimates(bars: Sequence[Bar], trades: Sequence[dict],
         out["ratio"] = est / real
         out["abs_error_bps"] = abs(est - real) * 10_000
     return out
+
+
+# --- charging a whole backtest -------------------------------------------------
+#
+# `CostModel.estimate` prices one position from one window of bars. A backtest
+# needs a `Callable[[Label], float]` covering tens of thousands of trades, and
+# the gap between those two shapes is why every result printed so far was
+# uncosted: nothing converted one into the other, so `costed` was always False
+# and `survives_costs` -- the property the whole cost module exists to feed --
+# was always False with it.
+
+#: Charged when no bars exist to estimate a spread from. This is the measured
+#: median round trip across the cached universe (93bps), NOT the model floor.
+#:
+#: The choice matters more than it looks. Every trade must carry a cost or the
+#: whole result reverts to uncosted, so a missing estimate cannot simply be
+#: skipped. Falling back to the 5bps floor would price an unmeasurable microcap
+#: like a mega-cap and flatter exactly the names most likely to be untradeable.
+#: Falling back to the universe median is wrong in the safe direction, and the
+#: count of trades that used it is reported so nobody has to guess how much of a
+#: result rests on it.
+FALLBACK_COST_BPS = 93.0
+
+#: Spread estimates are bucketed to the calendar month of entry. A 252-session
+#: trailing EDGE estimate moves very little over 21 sessions, and the bucket cuts
+#: estimator calls by roughly twenty times on a universe this size. The bucket
+#: boundary is the month START, and the estimate uses bars strictly before it, so
+#: no bar from the entry month -- let alone after the entry -- can enter its own
+#: cost.
+class CostTable:
+    """Round-trip cost per trade, precomputed from cached bars.
+
+    Point-in-time by construction: the window handed to the estimator ends
+    before the month the trade enters in. Using the trailing 252 sessions
+    *including* the entry would let the post-entry price path set the cost of
+    the trade being measured, which biases in whichever direction the trade
+    happened to go.
+
+    Impact is not charged, because no position size is specified. The cost here
+    is spread plus fees -- the floor any size pays. A sized backtest should pass
+    `shares` through `CostModel.estimate` instead and will get a strictly higher
+    number.
+    """
+
+    def __init__(self, cache, *, model: "CostModel | None" = None,
+                 basis: str | None = None,
+                 fallback_bps: float = FALLBACK_COST_BPS) -> None:
+        self.cache = cache
+        self.model = model or CostModel()
+        self.basis = basis
+        self.fallback = fallback_bps / 10_000
+        self._series: dict[str, object] = {}
+        self._memo: dict[tuple[str, int, int], float] = {}
+        self.estimated = 0
+        self.fell_back = 0
+        self.upper_bound = 0
+
+    def _bars(self, symbol: str, before: "date"):
+        from datetime import timedelta
+
+        series = self._series.get(symbol)
+        if series is None:
+            kwargs = {} if self.basis is None else {"basis": self.basis}
+            # Four years back: SPREAD_WINDOW is 252 sessions and the request is
+            # in calendar days, with delistings and thin names leaving gaps.
+            series = self.cache.get(
+                symbol, before - timedelta(days=1500), before, **kwargs
+            )
+            self._series[symbol] = series
+        return [b for b in series.bars if b.day < before]
+
+    def __call__(self, label) -> float:
+        day = label.entry_day
+        if not label.symbol or day is None:
+            self.fell_back += 1
+            return self.fallback
+        key = (label.symbol, day.year, day.month)
+        hit = self._memo.get(key)
+        if hit is not None:
+            return hit
+
+        from datetime import date as _date
+
+        month_start = _date(day.year, day.month, 1)
+        bars = self._bars(label.symbol, month_start)
+        if len(bars) < MIN_SPREAD_WINDOW:
+            self.fell_back += 1
+            self._memo[key] = self.fallback
+            return self.fallback
+
+        cost = self.model.estimate(bars)
+        self.estimated += 1
+        if cost.spread_is_upper_bound:
+            self.upper_bound += 1
+        self._memo[key] = cost.total
+        return cost.total
+
+    def summary(self) -> str:
+        total = self.estimated + self.fell_back
+        share = self.fell_back / total if total else 0.0
+        return (
+            f"costs: {self.estimated:,} (symbol, month) estimates, "
+            f"{self.fell_back:,} fell back to {FALLBACK_COST_BPS:.0f}bps "
+            f"({share:.1%} of charges); {self.upper_bound:,} estimates sit in "
+            f"the regime where EDGE reads high and are upper bounds, not "
+            f"measurements"
+        )

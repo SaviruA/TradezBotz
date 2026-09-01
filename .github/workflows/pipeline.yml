@@ -199,6 +199,30 @@ jobs:
       - name: Status
         run: python -m tradezbotz status
 
+      # The step every other step exists to feed, and until now the one that did
+      # not exist. Everything underneath it was built and tested -- labeller,
+      # cost model, clustering corrections, trial registry, sweep -- and no code
+      # path called them together, so no backtest had ever been run.
+      #
+      # Placed last, after `status`, and time-boxed by the step timeout rather
+      # than a budget flag: it competes with nothing, and the state save runs on
+      # always() so a cut-off measure step still persists the ingest above it.
+      # The 10 minutes come from the run's existing headroom (~314 budgeted
+      # against 330), so nothing else was trimmed to fit it.
+      #
+      # `continue-on-error` because measurement failing must not lose a run's
+      # fetching, and --limit because feature enrichment costs roughly a
+      # millisecond per (symbol, day) pair and the event store is large.
+      #
+      # Expect "too few trades" on most rows until the backfill covers the
+      # universe. That is the correct output for the data, not a failure: the
+      # sweep reporting a thin population is exactly what it is for.
+      - name: Measure the candidate backlog
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          python -m tradezbotz measure --limit 40000
+
       # `always()` so an interrupted or failed step still persists the work that
       # did complete. Losing hours of fetching to one bad step would be the worst
       # possible failure mode here.
