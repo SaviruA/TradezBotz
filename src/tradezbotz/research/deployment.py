@@ -79,10 +79,26 @@ class Criteria:
     #: relative to reality, never optimistic, so it is sized off the capital you
     #: might REACH rather than the capital you start with.
     live_test_capital: float = 0.0
-    #: Positions to hold during the live test. One or two, not ten: at $10 a
-    #: position only 24% of cached names are buyable as a whole share, and only
-    #: 56% of listed US equities are fractionable at all.
-    live_test_positions: int = 1
+    #: Positions to hold during the live test. Measured against the cached
+    #: universe: at $25 a position, 37% of names are buyable as a whole share
+    #: and another 61% via fractional shares -- 98% reachable in total, because
+    #: 92% of the cached universe is fractionable. Splitting is therefore safe
+    #: at this stake, which it would not be on a universe of thin non-
+    #: fractionable names.
+    live_test_positions: int = 4
+    #: Capital the PAPER account deploys. Deliberately equal to
+    #: `capital_at_risk` rather than to the account balance or the live test
+    #: stake.
+    #:
+    #: The account offers $100,000. Using all of it per position would "fill"
+    #: orders that could never fill live, which is false confidence rather than
+    #: a test. Using the $100 live stake would exercise none of the portfolio
+    #: mechanics -- concurrent positions, buying power, ordering -- that paper
+    #: exists to shake out.
+    #:
+    #: Matching the backtest size means paper, backtest and eventual live all
+    #: describe the same strategy. The remaining balance is headroom.
+    paper_capital: float = 0.0
     #: How many positions may be open at once. Needed to turn total capital
     #: into a position size, and a position size is what determines market
     #: impact -- so this is a cost-model input, not portfolio housekeeping.

@@ -219,9 +219,21 @@ def test_the_live_test_holds_few_enough_positions_to_be_fillable():
     c = load()
 
     per_position = c.live_test_capital / max(c.live_test_positions, 1)
-    assert per_position >= 50, (
-        f"${per_position:.0f} per live-test position is below the price of most "
-        "of the universe; use fewer positions")
+    assert per_position >= 20, (
+        f"${per_position:.0f} per live-test position is too small to reach most "
+        "of the universe even with fractional shares; use fewer positions")
+
+
+def test_paper_is_sized_like_the_backtest_not_like_the_account():
+    """Paper's job is plumbing and live-vs-backtest agreement, and neither is
+    served by trading the account's full balance -- that would "fill" orders
+    which could never fill live. Matching the backtest size keeps paper,
+    research and eventual live describing one strategy."""
+    c = load()
+
+    assert c.paper_capital == c.capital_at_risk, (
+        "paper capital should mirror the backtest's sizing, not the account "
+        "balance and not the live test stake")
 
 
 def test_the_report_says_plainly_that_nothing_can_pass():

@@ -39,8 +39,9 @@ The single most important distinction in this file.
 
 | | value | job |
 | --- | --- | --- |
-| `capital_at_risk` | $25,000 over 10 positions | **sizes the backtest.** What the cost model charges market impact against |
-| `live_test_capital` | $100 in 1 position | **Phase 3b.** The real stake, whose only job is measuring realised slippage |
+| `capital_at_risk` | $25,000 over 10 positions | **sizes the backtest.** What the cost model charges impact against |
+| `paper_capital` | $25,000, same sizing | **Phase 3a.** Mirrors the backtest so paper describes the same strategy |
+| `live_test_capital` | $100 across 4 positions | **Phase 3b.** The real stake, measuring realised slippage |
 
 They must not be the same number, and the direction of the error matters.
 
@@ -54,21 +55,40 @@ When unsure, round `capital_at_risk` **up**. Higher makes the backtest charge
 more cost and reject more candidates; lower makes it generous. The asymmetry is
 the whole point.
 
-**The paper account's $100,000 balance is headroom, not a target.** Paper must
-trade the same per-position size as the intended live plan, or the paper run
-measures a different strategy — different impact, different fillability.
+### Paper sizing — corrected
 
-### Why the live test is one position, not ten
+An earlier draft said paper must mirror the *live test* stake. That was too
+strict and is withdrawn. Phase 3a's jobs are plumbing and live-vs-backtest
+agreement, and neither depends on trading $100.
 
-Measured, not assumed:
+What paper sizing must avoid is the opposite error: deploying the account's full
+$100,000 per position would "fill" orders that could never fill live, which is
+false confidence rather than a test. And using the $100 stake would exercise
+none of the portfolio mechanics — concurrent positions, buying power, ordering —
+that paper exists to shake out.
 
-- Only **56%** of active listed US equities are fractionable. Below one share,
-  a non-fractionable order is rejected outright, not merely small.
-- At **$10** a position, only **24%** of cached names are buyable as a whole
-  share. At **$100**, **71%** are.
+So paper mirrors **the backtest**: $2,500 a position, ten positions, $25,000 of
+the available $100,000. Paper, research and eventual live then all describe one
+strategy. The remaining balance is headroom, not a target.
 
-So $100 split ten ways is mostly unfillable. $100 in one position is a real
-order against most of the universe.
+### The live test splits into four, and that is measured
+
+$100 across 4 positions is $25 each. Against the cached universe:
+
+| stake | whole share | + fractional | reachable |
+| --- | --- | --- | --- |
+| $10 | 22% | 168 names | **96%** |
+| $25 | 37% | 138 names | **98%** |
+| $50 | 55% | 100 names | **100%** |
+
+**92% of the cached universe is fractionable**, far above the 56% across all
+listed US equities — because the backfill has reached the names that actually
+trade. So $25 positions are fine.
+
+One caveat: the cached universe currently skews liquid. As the backfill reaches
+thinner microcaps the fractionable share will fall, and $25 positions may become
+unreachable on part of the universe. Worth re-measuring before the live test
+rather than assuming this holds.
 
 ---
 
