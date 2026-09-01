@@ -147,11 +147,86 @@ at 140 observations and OperatingIncomeLoss at 168. The frames endpoint returns
 | **Non-preplanned insider selling** | planned | Form 4 `aff10b5One` = false. The sell-side mirror of the routine/opportunistic classifier. **Coverage constraint below.** |
 | Margin compression (gross + operating) | built | 4 consecutive quarters of decline; GrossProfit / OperatingIncomeLoss / Revenues |
 | Price/Sales + gross margin | built | `fundamentals.Snapshot` -- P/E is undefined for 74% of small caps |
-| Price/FCF, EV/EBITDA | planned | XBRL plus our own prices; no vendor needed |
+| **Price/FCF** | planned | computable for **64.7%** of small filers; cash is harder to dress up than net income. The one multiple worth adding — see the measurement below |
+| **EV/EBITDA** | blocked | best-evidenced multiple in the literature and computable for only **14.4%** of small filers. The missing 86% are not missing at random |
+| Forward P/E | blocked | needs analyst consensus. Microcaps are largely uncovered, point-in-time estimates are not free, and it inherits P/E's undefinedness anyway |
+| PEG (textbook) | blocked | rejected on the same grounds, plus Damodaran's: dividing P/E by growth does not neutralise growth, ignores risk, and double-counts the first year |
 | YoY revenue growth | built | conditioner rather than a signal on its own |
 | Value/Growth score (P/S ÷ growth) | built | a sales-based PEG variant; low = most growth per dollar of valuation |
 | Customer concentration > 25% | blocked | 10-K narrative text, not tagged in XBRL |
 | GAAP vs non-GAAP gap, guidance cuts | blocked | narrative text |
+
+### Which valuation multiple, and can we compute it?
+
+Prompted by a "Five Numbers That Tell You What A Stock Actually Costs" guide
+(P/S, forward P/E, PEG, EV/EBITDA, P/FCF). Two separate questions, and they give
+opposite answers.
+
+**Which multiple predicts returns?** The literature is fairly clear and it does
+not favour the ones retail guides lead with. [Loughran & Wellman (JFQA
+2011)](https://www.cambridge.org/core/journals/journal-of-financial-and-quantitative-analysis/article/abs/new-evidence-on-the-relation-between-the-enterprise-multiple-and-average-stock-returns/5CD22A12A06AFCDC5233E477757FB659)
+build an enterprise-multiple factor earning **5.28% a year**, reading EV/EBITDA
+as a proxy for the discount rate. [Gray & Vogel (JPM
+2012)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1970693) race the
+metrics against each other over 40 years and find **EBITDA/TEV wins**, beating
+P/E, book-to-market and FCF/TEV. So the best-evidenced multiple is the one the
+guide gives fourth billing, and PEG — which it calls a "cheat code" — is the one
+[Damodaran](https://pages.stern.nyu.edu/~adamodar/pdfiles/eqnotes/peg.pdf)
+dismantles: dividing P/E by growth does not neutralise growth, it entangles it
+further, ignores risk entirely, and double-counts the first year.
+
+**Can we compute it on our universe?** Measured against the SEC frames API for
+CY2024, over the 1,815 filers reporting revenue under $100M:
+
+| input | filers | share |
+| --- | --- | --- |
+| operating cash flow | 1,794 | 98.8% |
+| net income | 1,754 | 96.6% |
+| operating income | 1,620 | 89.3% |
+| capex | 1,183 | 65.2% |
+| D&A (both tags) | 831 | 45.8% |
+| **FCF computable** (op cash flow − capex) | **1,175** | **64.7%** |
+| **EBITDA computable** (op income + D&A) | 723 | 39.8% |
+| ...+ cash | 665 | 36.6% |
+| **EV/EBITDA computable** (+ any debt tag) | **261** | **14.4%** |
+
+So the best multiple in the literature is computable for one small filer in
+seven. **And the missing six are not missing at random** — they are the smallest
+and least-resourced filers, which is precisely where insider buying
+concentrates. An EV/EBITDA screen here would not be a valuation filter; it would
+be a filter for having a full accounting department, correlated with size,
+survival and analyst attention. That is a selection bias wearing a valuation
+filter's clothing, the same objection that ruled out P/E.
+
+A further trap specific to EV: a filer with no debt tag may have no debt, or may
+simply not have tagged it. XBRL does not distinguish those, and treating absent
+as zero would systematically understate enterprise value for the least
+well-tagged names.
+
+**P/FCF is the one to build.** 64.7% coverage, cash is materially harder to
+manage than net income, and it is genuinely new information — every fundamental
+we hold today derives from the income statement. It still needs a coverage gate,
+because 35% missing is not nothing.
+
+**Forward P/E is a non-starter** twice over: it needs analyst consensus, which
+[microcaps largely do not have](https://www.osam.com/Commentary/a-true-microcap-strategy),
+and point-in-time historical estimates are not available free — using today's
+estimates to judge a 2019 decision is the same lookahead that ruled out Yahoo
+and Macrotrends for fundamentals.
+
+**A structural caution about the source.** Every worked example in that guide is
+a mega-cap — SpaceX, Amazon, JPMorgan, Apple — and so are its thresholds
+("under 15 reads as cheap", "PEG under one"). Those are calibrated on a
+population where earnings exist. In ours, 74% of small filers have negative net
+income, so three of its five numbers are undefined for most of the universe
+before any judgement about their usefulness is made. The document is a
+newsletter lead magnet with a portfolio CTA, which is not itself a reason to
+discount the content, but it is a reason to expect thresholds chosen for
+readability rather than fitted to anything.
+
+**Where it agrees with us, it agrees for the right reason:** its case for P/S is
+that it works on unprofitable companies with no earnings to divide by. That is
+exactly why `fundamentals.py` leads with P/S.
 
 ### The 10b5-1 coverage constraint
 
