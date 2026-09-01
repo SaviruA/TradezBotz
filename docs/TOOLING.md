@@ -248,3 +248,46 @@ that rules out Yahoo for fundamentals. Milder here -- it is a mechanical text
 count over fixed archives rather than a restatable judgement -- and every row is
 stamped with its fetch time so a revision is at least detectable. Not
 eliminated, and a result resting on GPR should be read with that in mind.
+
+### How the community actually uses worldmonitor
+
+Checked 2026-09-01, because "the community backs it" is a claim about usage and
+the star count does not measure usage.
+
+**Contribution is real.** 465 issues opened by people other than the owner,
+1,016 pull requests from outside it, ~102 contributors. That is a genuine
+project with a genuine contributor base, not a one-person repo with a good
+README.
+
+**But every visible use is as an application, not as a data source.** Sampling
+the most-starred forks by what their owners renamed and changed them into:
+
+| fork | what it is |
+| --- | --- |
+| `worldmonitor-unraid-aio`, `worldmonitor-macos` | self-hosting and desktop packaging |
+| `berkbyte/solana-monitor` | re-skinned for crypto |
+| `earthecosystem/worldviewer` | re-skinned for environment |
+| `tncsharetool/worldmonitor` | re-skinned to monetise via affiliate and ad flows |
+| `worldmonitor-app/worldmonitor` | "World Monitor Pro", a commercial derivative |
+| `swatfa/worldmonitor-bayesian` | the only analytical fork found |
+| `FutureSpeakAI/agent-fridays-...` | agent integration |
+
+Nobody found is consuming it as a feed inside a research pipeline. They run the
+dashboard, or fork it into a different dashboard. That is consistent with the
+code: caches with 60-second to 90-day TTLs are built for a screen, not an
+archive.
+
+**Two engagement ratios are unusual and worth recording without over-reading.**
+Watchers are 0.58% of stars where 2-5% is typical, and forks are 15.1% where
+5-10% is typical. Sustained growth is ~361 stars/day since January. No organic
+Hacker News or Reddit discussion surfaced; the third-party write-ups that exist
+are SEO-shaped blog posts. For context and explicitly **not** as an allegation
+against this project: an ICSE 2026 study found ~6M suspected fake stars across
+18,617 repositories, with AI/LLM projects the largest non-malicious target
+category. The honest conclusion is narrower and sufficient -- **the star count
+is not evidence of usage here, and the contribution count is.** Read the second.
+
+**What this changes for us: nothing.** The original refusal stands on the code,
+not on the popularity. The community's own usage pattern -- run it, or fork it
+into another dashboard -- is exactly the role we identified as the only one it
+could play here, and only once something is deployed to monitor.
