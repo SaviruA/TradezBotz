@@ -468,6 +468,57 @@ class ProfileStore:
         self.mark_fetched(profile.symbol, profile.day)
         self._conn.commit()
 
+    def put_many(self, profiles: Sequence[SessionProfile]) -> int:
+        """Store a batch under a single commit.
+
+        `put` commits twice per session -- once for the profile, once for the
+        fetch marker -- and each commit is an fsync. Measured at 442 sessions/s
+        against 62,000/s for the same writes under one commit: a 140x
+        difference, and roughly 13 minutes of pure fsync across the 343,125
+        sessions already stored.
+
+        That cost is why the intraday step overran a 15-minute budget by 36
+        minutes. It is not a rounding error on a step whose whole purpose is to
+        reduce hundreds of thousands of sessions.
+        """
+        if not profiles:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO session_profiles ("
+            "symbol, day, low, high, volume, vwap, histogram, delta, "
+            "unsigned_volume, minute_count, rth_only, flow_method, "
+            "session_open, session_close, low_minute, high_minute, "
+            "volume_after_low, volume_after_high"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(p.symbol, p.day.isoformat(), p.low, p.high, p.volume, p.vwap,
+              _pack(p.histogram), p.delta, p.unsigned_volume, p.minute_count,
+              int(p.rth_only), p.flow_method, p.session_open, p.session_close,
+              p.low_minute, p.high_minute, p.volume_after_low,
+              p.volume_after_high) for p in profiles],
+        )
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO profile_fetches VALUES (?,?,?)",
+            [(p.symbol.upper(), p.day.isoformat(), now) for p in profiles],
+        )
+        self._conn.commit()
+        return len(profiles)
+
+    def mark_many_fetched(self, pairs: Sequence[tuple[str, date]]) -> None:
+        """Record attempted-but-empty sessions in one commit.
+
+        A session with no prints is a real outcome and must be marked, or the
+        backfill re-requests it on every run forever.
+        """
+        if not pairs:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO profile_fetches VALUES (?,?,?)",
+            [(s.upper(), d.isoformat(), now) for s, d in pairs],
+        )
+        self._conn.commit()
+
     def mark_fetched(self, symbol: str, day: date) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO profile_fetches VALUES (?,?,?)",

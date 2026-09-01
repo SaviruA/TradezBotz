@@ -243,3 +243,63 @@ def test_a_session_without_timing_is_refused_rather_than_skipped():
 
     with pytest.raises(TimingUnavailable):
         swept_low_intraday(stale, level=9.5)
+
+
+# --- batched writes ---------------------------------------------------------
+
+def test_put_many_stores_every_profile(tmp_path):
+    store = ProfileStore(tmp_path / "p.db")
+    profiles = [build_profile(f"S{i}", DAY, sweep_session(low_at=10))
+                for i in range(25)]
+
+    n = store.put_many(profiles)
+
+    assert n == 25
+    assert store.count() == 25
+    assert store.get("S7", DAY).low_minute == 10
+    store.close()
+
+
+def test_put_many_also_marks_them_fetched(tmp_path):
+    """Without this the backfill re-requests every stored session forever --
+    `was_fetched` is what makes the step resumable."""
+    store = ProfileStore(tmp_path / "p.db")
+
+    store.put_many([build_profile("AAA", DAY, sweep_session(low_at=10))])
+
+    assert store.was_fetched("AAA", DAY) is True
+    store.close()
+
+
+def test_put_many_on_an_empty_batch_is_a_no_op(tmp_path):
+    store = ProfileStore(tmp_path / "p.db")
+    assert store.put_many([]) == 0
+    store.close()
+
+
+def test_mark_many_fetched_records_sessions_that_had_no_prints(tmp_path):
+    """A session with no prints is a real outcome, not a gap. Unmarked, it is
+    re-requested on every run for ever."""
+    store = ProfileStore(tmp_path / "p.db")
+
+    store.mark_many_fetched([("AAA", DAY), ("BBB", DAY)])
+
+    assert store.was_fetched("AAA", DAY) is True
+    assert store.was_fetched("BBB", DAY) is True
+    assert store.count() == 0, "marked as attempted, not stored as a profile"
+    store.close()
+
+
+def test_batched_and_per_session_writes_agree(tmp_path):
+    """The batched path duplicates put()'s column list, so it can drift from it.
+    A mismatch would write values into the wrong columns rather than fail."""
+    one = ProfileStore(tmp_path / "one.db")
+    many = ProfileStore(tmp_path / "many.db")
+    profile = build_profile("AAA", DAY, sweep_session(low_at=10))
+
+    one.put(profile)
+    many.put_many([profile])
+
+    assert one.get("AAA", DAY) == many.get("AAA", DAY)
+    one.close()
+    many.close()

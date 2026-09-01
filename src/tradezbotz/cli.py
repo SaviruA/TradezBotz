@@ -631,7 +631,22 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
                 print(f"  batch {i // args.batch}: {type(exc).__name__}: {exc}")
                 continue
 
+            # Accumulated across the batch and written under one commit. The
+            # per-session `put` committed twice each, at 442 sessions/s against
+            # 62,000/s batched -- which is most of why this step overran a
+            # 15-minute budget by 36.
+            pending: list = []
+            empty: list = []
+            overran = False
             for symbol, bars in bars_by_symbol.items():
+                # The deadline was checked only between batches, and a batch is
+                # 50 symbols x ~124 sessions. One batch could therefore run for
+                # tens of minutes past the budget, which is exactly what
+                # happened. Checked per symbol now, so the overrun is bounded by
+                # one symbol rather than one batch.
+                if deadline and time.monotonic() > deadline:
+                    overran = True
+                    break
                 for day, session in group_by_session(bars).items():
                     if store.was_fetched(symbol, day):
                         # --refresh-untimed rebuilds only what is actually
@@ -651,7 +666,7 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
                     if profile is None:
                         # A real session with no prints. Recorded as attempted so
                         # the next run does not ask again.
-                        store.mark_fetched(symbol, day)
+                        empty.append((symbol, day))
                         continue
                     if args.exact:
                         try:
@@ -662,12 +677,18 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
                                 exact_done += 1
                         except Exception as exc:          # noqa: BLE001
                             print(f"  {symbol} {day}: flow unavailable ({exc})")
-                    store.put(profile)
+                    pending.append(profile)
                     built += 1
+
+            store.put_many(pending)
+            store.mark_many_fetched(empty)
 
             print(f"  {min(i + args.batch, len(symbols))}/{len(symbols)} symbols  "
                   f"sessions built {built:,}  skipped {skipped:,}"
                   + (f"  exact flow {exact_done:,}" if args.exact else ""))
+            if overran:
+                print("time budget reached mid-batch; state is checkpointed")
+                break
 
         print(f"\nstored sessions : {store.count():,}")
         print(f"symbols covered : {len(store.symbols())}")
