@@ -35,6 +35,9 @@ FACTS_DB = "facts.db"
 #: Alpaca's US equity asset list, including inactive listings. What makes
 #: "delisted" distinguishable from "never existed" and from "OTC".
 ASSETS_DB = "assets.db"
+#: Daily geopolitical risk (Caldara & Iacoviello). One world-level series,
+#: so it conditions every event rather than describing any one symbol.
+MACRO_DB = "macro.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -1004,6 +1007,27 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_ingest_macro(args: argparse.Namespace) -> int:
+    """Refresh the daily geopolitical risk series.
+
+    One download covering 1985 to now, so this costs seconds and is worth
+    running every pass. The series is republished when its methodology moves,
+    which is why every row carries the time it was fetched.
+    """
+    from .research.macro import MacroStore, fetch_gpr
+
+    store = MacroStore(DEFAULT_STATE / MACRO_DB)
+    rows = fetch_gpr()
+    n = store.put_many(rows)
+    span = store.span()
+    print(f"geopolitical risk: {n:,} daily observations")
+    if span:
+        print(f"  covering {span[0]} to {span[1]}")
+    print(f"  fetched at {store.fetched_at()}")
+    store.close()
+    return 0
+
+
 def cmd_ingest_assets(args: argparse.Namespace) -> int:
     """Refresh the local asset catalog and report universe composition.
 
@@ -1360,6 +1384,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
         from .research.joins import (
             FundamentalsJoin,
             HoldingsJoin,
+            MacroJoin,
             ProfileJoin,
             enrich_all,
         )
@@ -1381,6 +1406,18 @@ def cmd_measure(args: argparse.Namespace) -> int:
 
         hstore = EventStore(events_path)
         active.append(HoldingsJoin(hstore))
+
+        macro_path = DEFAULT_STATE / MACRO_DB
+        if macro_path.exists():
+            from .research.macro import MacroStore
+            mstore = MacroStore(macro_path)
+            if mstore.count():
+                active.append(MacroJoin(mstore))
+            else:
+                mstore.close()
+                print("macro: store is empty; run ingest-macro")
+        else:
+            print("macro: no store yet; run ingest-macro")
 
         facts_path = DEFAULT_STATE / FACTS_DB
         if facts_path.exists():
@@ -1659,6 +1696,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "default -- this is for diagnosing the sweep, not for "
                          "producing a finding")
     ms.set_defaults(func=cmd_measure, features=True, costs=True, joins=True)
+
+    mac = sub.add_parser("ingest-macro",
+                         help="refresh the daily geopolitical risk series "
+                              "(Caldara & Iacoviello, 1985 onward)")
+    mac.set_defaults(func=cmd_ingest_macro)
 
     ast = sub.add_parser("ingest-assets",
                          help="refresh the asset catalog; classifies the "

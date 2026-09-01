@@ -186,6 +186,17 @@ jobs:
       #
       # Incremental: resolved symbols and confirmed 404s are both cached, so
       # steady state is one request.
+      # Daily geopolitical risk (Caldara & Iacoviello, Fed IFDP 1222). One
+      # download covering 1985 onward, so it costs seconds.
+      #
+      # This reaches something per-symbol sentiment cannot. Our universe is
+      # microcaps journalists ignore, so news sentiment has no history at any
+      # price -- but a world-level regime needs no per-symbol coverage at all.
+      # It conditions every event rather than describing any one symbol.
+      - name: Refresh geopolitical risk series
+        continue-on-error: true
+        run: python -m tradezbotz ingest-macro
+
       - name: Classify the symbol universe
         continue-on-error: true
         env:

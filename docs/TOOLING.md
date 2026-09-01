@@ -205,3 +205,46 @@ surface. Watching positions and geopolitical context in real time is a different
 job from research, it has no point-in-time requirement, and worldmonitor is a
 strong candidate for it. We have nothing deployed, so that job does not exist
 yet.
+
+### Follow-up: the idea was right, the vehicle was wrong
+
+The operator pushed back on the refusal above -- geopolitical situation data is
+hand in hand with the sentiment work -- and that was correct. The reframing it
+forced is worth recording, because the original assessment measured
+worldmonitor against the wrong requirement.
+
+`news sentiment` is blocked because no per-symbol history exists for a universe
+journalists ignore. A **macro regime has no per-symbol requirement at all**: one
+series per day conditions every event, so the coverage problem that blocks
+sentiment simply does not arise. That is a different question, and it is
+answerable.
+
+What it needed was a source with real history, which worldmonitor is not -- its
+Country Instability Index is a live gauge with "approximate 24-hour movement".
+[Caldara & Iacoviello's Geopolitical Risk index](https://www.matteoiacoviello.com/gpr.htm)
+is, and it is free from the authors at the Fed:
+
+| | |
+| --- | --- |
+| daily observations | 15,218, from 1985-01-01 |
+| inside our labelling window | 3,896, **zero missing days** |
+| distribution | mean 115.0, sd 61.5, range 0 to 540.8 |
+
+It passes a sanity check that matters: **2020-03-16 reads in the 3rd percentile**
+of trailing risk. The COVID crash was a health and economic shock, not a
+geopolitical one, and the index says so -- while 2022-03-01 (Russia/Ukraine)
+reads at the 100th. It is measuring what it claims to.
+
+Built as `research/macro.py` plus `joins.MacroJoin`, with two new candidates
+(`gpr_high`, `gpr_low`) and their insider-buy pairs. Two design points carried
+over from everything else here: the regime is a **trailing** percentile, never a
+full-sample one, or every 2016 label would carry four decades of subsequent
+history; and the reading used is the one **strictly before** the entry day,
+since the day's own index counts that day's newspapers.
+
+The honest weakness is revision. GPR is recomputed when its methodology moves,
+so today's file evaluating a 2019 decision risks the same back-door lookahead
+that rules out Yahoo for fundamentals. Milder here -- it is a mechanical text
+count over fixed archives rather than a restatable judgement -- and every row is
+stamped with its fetch time so a revision is at least detectable. Not
+eliminated, and a result resting on GPR should be read with that in mind.

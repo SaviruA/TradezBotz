@@ -384,3 +384,47 @@ def enrich_all(payloads: Sequence[dict], labels: Sequence[Label],
             merged.update(extra)
         out.append(merged)
     return out
+
+
+class MacroJoin:
+    """Geopolitical regime at the entry date.
+
+    The one join that needs no per-symbol coverage, which is exactly why it is
+    usable where news sentiment is not: a single world-level series conditions
+    every event, so a universe of microcaps that journalists ignore is no
+    obstacle.
+
+    Strictly a conditioner. One number per day cannot distinguish two symbols,
+    so these fields only ever answer "does this signal behave differently when
+    the world looks dangerous" -- which is a real question and the shape
+    `all_of` was built for.
+    """
+
+    needs_payload = False
+
+    def __init__(self, store, lookback_days: int | None = None) -> None:
+        self.store = store
+        self.lookback_days = lookback_days
+        self.enriched = 0
+        self.skipped_no_history = 0
+
+    def features(self, label: Label) -> dict:
+        if label.entry_day is None:
+            return {}
+        from .macro import REGIME_LOOKBACK_DAYS
+
+        regime = self.store.regime_at(
+            label.entry_day,
+            lookback_days=self.lookback_days or REGIME_LOOKBACK_DAYS)
+        if regime is None:
+            self.skipped_no_history += 1
+            return {}
+        self.enriched += 1
+        return {"has_macro": True, **regime}
+
+    def summary(self) -> str:
+        span = self.store.span()
+        where = f"{span[0]} to {span[1]}" if span else "empty"
+        return (f"macro: {self.enriched:,} events carry a geopolitical regime, "
+                f"{self.skipped_no_history:,} predate enough trailing history "
+                f"(series covers {where})")

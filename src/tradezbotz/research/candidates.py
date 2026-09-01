@@ -241,6 +241,21 @@ JOIN_HYPOTHESES: tuple[tuple[str, str, str], ...] = (
      "A 13F disclosed a position change within 90 days.",
      "no edge. The 45-day lag is most of a quarter, and whatever the filer "
      "knew is public by the time we see it"),
+    ("gpr_high",
+     "Entry falls in the top quintile of geopolitical risk, ranked against the "
+     "trailing five years only. Caldara & Iacoviello's newspaper-based index, "
+     "daily since 1985.",
+     "unknown, and the most interesting unknown here. A conditioner rather than "
+     "a signal: one world-level series cannot pick between two symbols, it can "
+     "only ask whether insider buying pays differently when the world looks "
+     "dangerous. The plausible mechanism is indiscriminate risk-off selling "
+     "making an insider's purchase a stronger statement"),
+    ("gpr_low",
+     "The complement band -- bottom quintile of trailing geopolitical risk. "
+     "Included so a result in the high band can be read against its opposite "
+     "rather than against the whole population.",
+     "if gpr_high works and gpr_low does not, that is a regime finding; if both "
+     "work, the conditioner is doing nothing and the edge is unconditional"),
     ("profitable",
      "Positive trailing twelve-month net income, from XBRL filtered on `filed`.",
      "a quality conditioner rather than a signal. 74% of small filers fail it, "

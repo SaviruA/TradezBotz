@@ -16,3 +16,4 @@ pytest>=8.0
 # scores are stored once, so nothing downstream requires the model.
 #   pip install 'transformers>=4.40' torch   # FinBERT, historical-safe
 #   pip install vaderSentiment               # social text
+xlrd>=2.0        # legacy .xls, for the GPR daily workbook
