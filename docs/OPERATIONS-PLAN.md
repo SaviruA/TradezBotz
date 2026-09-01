@@ -91,10 +91,9 @@ to a result.
 capital, drawdown halt and position ceiling. That is the intended state, not an
 omission.
 
-Write `docs/DEPLOYMENT-CRITERIA.md` and commit it as a machine-checked gate.
-Values below are proposals, not defaults to accept quietly.
+What was committed:
 
-| criterion | proposed | why |
+| criterion | value | why |
 | --- | --- | --- |
 | Deflated Sharpe | ≥ 0.95 | already the `significant` gate |
 | Trades | ≥ 200 on train | 30 is the floor for arithmetic, not for conviction |
@@ -103,12 +102,14 @@ Values below are proposals, not defaults to accept quietly.
 | Control separation | control ≤ 50% of signal mean | tighter than `CONTROL_TOLERANCE` |
 | Holdout | confirmed **once**, declared in advance | `splits.unlock_holdout` enforces the ritual |
 | **Expected live haircut** | **assume ≥ 50% of backtest edge is lost** | [revised] the documented base rate; if the strategy is not viable at half, it is not viable |
-| Capital at risk | to decide | drives sizing and therefore impact |
-| Max drawdown → halt | to decide | the number at which the system stops itself |
+| Capital at risk | **UNSET** | drives sizing and therefore impact |
+| Max drawdown → halt | **UNSET** | the number at which the system stops itself |
 | Max position | ≤ 5% ADV | `costs.MAX_PARTICIPATION` flags 10% as infeasible |
 
-The last three are the operator's and cannot be defaulted. Without a drawdown
-halt there is no plan for being wrong, only a plan for being right.
+The two unset figures are the operator's and cannot be defaulted; a wrong guess
+would be worse than a blank. While they are unset `confirmed` stays false and
+the gate refuses every candidate, which is the correct behaviour rather than a
+gap to be worked around.
 
 ---
 
