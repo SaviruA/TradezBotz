@@ -184,6 +184,20 @@ independent replication to catch the next one.
 
 ---
 
+## Where the open items went
+
+T6 (survivorship) and T10's missing exit rule are carried into
+[OPERATIONS-PLAN.md](OPERATIONS-PLAN.md) rather than closed here: T6 needs the
+delisted backfill to run, and an exit rule is a trading decision rather than a
+research one. E1, E2 and E5 shape that plan's sequencing directly -- E2 is its
+Phase 0, and it is the phase that has to happen before any result is read.
+
+A later review of the plan found four more issues, three of which changed its
+shape: paper trading cannot validate market impact, the monitor as first drafted
+was an untracked selection channel, and promotion between phases is itself
+selection that must reach the trial count. The pipeline fragility that review
+also surfaced is fixed in `runlog.py`.
+
 ## What this changes
 
 Do not read the first KEEP as a finding. On current evidence the first KEEP is
