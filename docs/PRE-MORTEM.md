@@ -37,6 +37,12 @@
 launch-blocking Tigers are defects introduced during the last two days of work,
 by the same process that produced the tests asserting the system is correct.
 
+**Retraction, same day.** Elephant E3 originally claimed the expected outcome was
+that nothing survives the gates. Challenged, computed, and withdrawn — the cost
+and significance hurdles are clearable by roughly an order of magnitude against
+documented effect sizes. See E3 for the numbers and for why the wrong version
+was written.
+
 ---
 
 ## Tigers — launch-blocking
@@ -92,13 +98,49 @@ Sharpe, no capital at risk, no maximum drawdown, no decision rule. `judge()`
 returns KEEP or a rejection reason; KEEP has no agreed consequence. Goalposts
 that are undefined before the result can move after it.
 
-**E3 — The honest expected outcome is that nothing survives, and there is no plan
-for that.** 93bps round trips against microcap edges, recorded priors saying "no
-edge" for most of the 54 candidates, and a DSR bar that currently rises nightly.
-The pressure this creates is specific: relax a gate, extend a horizon, or reset
-the trial registry. T1 makes that pressure worse, because the bar becomes
-unreachable through a bug rather than through evidence — and the tempting fix is
-to clear `trials.db`.
+**E3 — RETRACTED 2026-09-01, same day, on challenge. The original claim was that
+"the honest expected outcome is that nothing survives." That was asserted, not
+computed, and computing it shows the opposite.**
+
+The hurdles we can actually calculate are clearable:
+
+| hurdle | required mean per trade | documented effect |
+|---|---|---|
+| Transaction costs alone | 0.93% | 6.3% mean CAR, microcap insider buys after >10% gains (arXiv 2602.06198) |
+| DSR @ 200 trials, effective n 2,000 | 0.94% | same |
+| DSR @ 200 trials, effective n 30 | 1.83% | same |
+| DSR @ 200 trials, fat tails (skew 2, kurt 12) | 0.92–1.23% | same |
+
+Costs are roughly 15% of the documented effect, not a wall. And T1's trial
+inflation moves the bar **logarithmically**, not catastrophically — 0.94% at 200
+trials to 1.32% at 20,000. T1 is a real defect and still worth fixing, but the
+original text called the bar "unreachable through a bug", and that was wrong by
+about an order of magnitude in implication.
+
+**What should genuinely be expected to fail, and by design:** the ~40 indicator
+candidates — RSI oversold, MACD cross, Bollinger tags, engulfing candles, the
+sweeps. Their recorded priors say "no edge" and those priors are well-founded;
+an edge in the most-tested indicators in existence would have been arbitraged
+decades ago. They are in the sweep as **controls**, not as hopes. Conflating
+"the controls will fail" with "the project will fail" is the error the original
+E3 made.
+
+**What remains genuinely uncertain** is not the effect size but the **coverage** —
+0.28% locally, incomplete in CI — and whether the documented effect survives our
+specific universe and corrections. That is a data problem under active repair,
+not a verdict on the signal.
+
+**Why the wrong version got written, which is the actual elephant.** A
+pre-mortem asks "why did it fail" and structurally rewards pessimism. "Nothing
+will survive" feels rigorous, is safe to say, and cannot embarrass anyone. It
+was generated from the framing rather than from evidence and went unchecked
+until the operator asked for the reasoning. That is Red Flag 1 from this skill's
+own reference — a Paper Tiger wearing a Tiger's clothes — committed inside the
+document meant to catch it.
+
+The residual real risk is the one the retraction does not remove: **there is
+still no definition of what result would be good enough to trade** (E2), so
+neither optimism nor pessimism is currently falsifiable.
 
 **E4 — Every audit has been run by the author.** The defects fixed in the last
 two days — `requeue` never attaching to its class, `lock.acquire()` misuse that
@@ -117,7 +159,10 @@ independent replication to catch the next one.
 ## What this changes
 
 Do not read the first KEEP as a finding. On current evidence the first KEEP is
-more likely to be an artefact of T1–T6 than a strategy.
+more likely to be an artefact of T1–T6 than a strategy — note that this is a
+claim about **measurement defects**, not about the signal. The retraction in E3
+matters here: there is no computed reason to expect the underlying effect to be
+absent, and the reasons to distrust an early result are all fixable.
 
 The cheapest high-value fixes are **T3 and T1**: pin the split dates in the
 workflow, and deduplicate the trial registry. Both are small, both are defects
