@@ -257,8 +257,14 @@ def fetch_asset(symbol: str, api_key: str | None = None,
                  name=a.get("name") or "")
 
 
-def describe(breakdown: dict[str, int]) -> str:
-    """Human-readable universe composition, with the two numbers that matter."""
+def describe(breakdown: dict[str, int], *, window: str = "") -> str:
+    """Human-readable universe composition, with the two numbers that matter.
+
+    `window` labels the period the counts cover. Without it the survivorship
+    ratio gets quoted as though it described the full history: 84.4% over the
+    2.5 years a local store happens to hold is a very different claim from
+    84.4% over thirteen years, and the number alone cannot tell them apart.
+    """
     total = sum(breakdown.values()) or 1
     lines = [
         f"  {LISTED:<10} {breakdown[LISTED]:>6,}  ({breakdown[LISTED]/total:.1%})"
@@ -275,8 +281,12 @@ def describe(breakdown: dict[str, int]) -> str:
     if ever_listed:
         share = survivors / ever_listed
         lines.append("")
+        span = f" over {window}" if window else " (WINDOW UNSTATED)"
         lines.append(f"  survivorship: {share:.1%} of ever-listed names are still "
-                     "trading")
+                     f"trading{span}")
+        if not window:
+            lines.append("  Quote this only with its window. A ratio over two "
+                         "years is not a ratio over thirteen.")
         if share > 0.95:
             lines.append("  WARNING: almost nothing in this universe delisted. "
                          "That is not what a decade of microcaps looks like, so "

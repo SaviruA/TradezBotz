@@ -13,6 +13,7 @@ still-running job wastes time but cannot corrupt state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -591,6 +592,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         catalog.close()
     else:
         print("universe          : unclassified; run ingest-assets")
+
+    trials_path = DEFAULT_STATE / TRIALS_DB
+    if trials_path.exists():
+        from .research.trials import TrialRegistry
+        reg = TrialRegistry(trials_path)
+        n, runs = reg.count(), reg.executions()
+        last = reg._conn.execute(
+            "SELECT MAX(last_run_at) FROM trials").fetchone()[0]
+        reg.close()
+        print(f"trials            : {n:,} distinct ({runs:,} executions)")
+        print(f"  last measured   : {last or 'never'}")
+    else:
+        # T7: measure runs with continue-on-error, so a silent permanent
+        # failure would otherwise look identical to a healthy pipeline.
+        print("trials            : NONE -- `measure` has never completed. "
+              "It runs with continue-on-error, so a persistent failure is "
+              "silent; check the measure step's log.")
 
     ckpt = DEFAULT_STATE / CHECKPOINT_DB
     if ckpt.exists():
@@ -1278,6 +1296,40 @@ def cmd_measure(args: argparse.Namespace) -> int:
     cov = coverage_report(labels)
     print("coverage: " + ", ".join(f"{k}={v}" for k, v in cov.items()))
 
+    # Coverage BY CLASSIFICATION, because the aggregate number hides the shape
+    # of the loss. Delisted issuers stay in the event store but their prices
+    # were often never fetched, so they label NO_DATA and drop out silently --
+    # and the names that drop out are exactly the ones whose absence biases a
+    # backtest upward. An aggregate 40% coverage made of 95% listed and 2%
+    # delisted is a survivorship problem; the same 40% spread evenly is not.
+    assets_path = DEFAULT_STATE / ASSETS_DB
+    if assets_path.exists():
+        from .research.assets import AssetCatalog
+
+        catalog = AssetCatalog(assets_path)
+        if catalog.count():
+            buckets: dict[str, list[int]] = {}
+            for lab in labels:
+                cls = catalog.classify(lab.symbol) if lab.symbol else "unknown"
+                seen, ok = buckets.setdefault(cls, [0, 0])
+                buckets[cls] = [seen + 1, ok + (1 if lab.returns else 0)]
+            print("labelled share by classification:")
+            for cls in sorted(buckets):
+                seen, ok = buckets[cls]
+                print(f"  {cls:<10} {ok:>7,} of {seen:>7,}  "
+                      f"({ok / seen if seen else 0:>6.1%})")
+            listed = buckets.get("listed", [0, 0])
+            delisted = buckets.get("delisted", [0, 0])
+            lr = listed[1] / listed[0] if listed[0] else 0.0
+            dr = delisted[1] / delisted[0] if delisted[0] else 0.0
+            if listed[0] and delisted[0] and lr > 0 and dr < lr * 0.5:
+                print(f"  WARNING: delisted names label at {dr:.1%} against "
+                      f"{lr:.1%} for listed ones. The backtest population is "
+                      "skewed toward survivors by roughly that gap, and returns "
+                      "measured on it are biased upward by an amount nothing "
+                      "here can estimate. Backfill the delisted symbols.")
+        catalog.close()
+
     # The specific trap this catches: the default basis is total-return on the
     # merits, but a cache filled before the dual-basis change holds price-only
     # bars. Every symbol then misses, coverage collapses, and the sweep reports
@@ -1351,7 +1403,28 @@ def cmd_measure(args: argparse.Namespace) -> int:
 
     costs = None
     if args.costs:
-        costs = CostTable(cache, model=CostModel(), basis=basis)
+        # `capital` turns the cost model from a spread-only estimate into one
+        # that charges market impact. Without a position size, participation is
+        # zero and impact is zero, so every net figure was an upper bound on
+        # performance rather than an estimate of it. Sizing is still crude --
+        # equal notional per trade -- but a stated crude size beats an implied
+        # size of zero.
+        costs = CostTable(cache, model=CostModel(), basis=basis,
+                          capital_per_trade=args.capital)
+
+    # Identity of this dataset, so a nightly re-run of the same sweep updates
+    # its trials instead of appending new ones. Without this the Deflated Sharpe
+    # bar climbed every night with no new hypothesis having been tested.
+    #
+    # The fingerprint deliberately includes what would make the same hypothesis
+    # a genuinely new look: the events measured, the window, the partition, the
+    # price basis and the horizons. Change any of those and it IS a new trial.
+    fingerprint = hashlib.sha256("|".join([
+        str(len(rows)), str(min(observed).date()), str(max(observed).date()),
+        args.partition, basis, args.horizons, args.kind,
+        str(args.features), str(args.joins), str(args.costs),
+    ]).encode("utf-8")).hexdigest()[:16]
+    print(f"dataset fingerprint: {fingerprint}")
 
     registry = TrialRegistry(DEFAULT_STATE / TRIALS_DB)
     cands = all_candidates(with_features=args.features,
@@ -1362,9 +1435,15 @@ def cmd_measure(args: argparse.Namespace) -> int:
           f"{registry.count()} already registered")
 
     try:
+        # Coverage is the labellable share -- the honest denominator for "what
+        # population does this result describe". fallback_share is filled after
+        # the sweep, since CostTable only learns it while charging.
+        coverage = float(cov.get("complete_rate", 0.0) or 0.0)
         assessments = sweep(
             cands, labels, payloads, registry=registry, horizons=horizons,
-            costs=costs, partition=args.partition,
+            costs=costs, partition=args.partition, dataset=fingerprint,
+            coverage=coverage,
+            fallback_share=(costs.fallback_rate() if costs else 0.0),
         )
     except SweepError as exc:
         print(str(exc), file=sys.stderr)
@@ -1566,6 +1645,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip indicator enrichment. Drops the indicator "
                          "candidates from the sweep entirely rather than "
                          "reporting them as zero-trade measurements")
+    ms.add_argument("--capital", type=float, default=25_000.0,
+                    help="notional per position, used to charge market impact. "
+                         "Zero leaves participation at zero, which makes every "
+                         "net return an upper bound rather than an estimate")
     ms.add_argument("--no-joins", dest="joins", action="store_false",
                     help="skip the intraday, holdings and fundamentals joins. "
                          "Their candidates then report zero trades, which reads "

@@ -45,6 +45,34 @@ was written.
 
 ---
 
+## Resolution status — updated 2026-09-01
+
+All twelve Tigers addressed in code. Verified end to end: four consecutive
+`measure` runs produced **216 executions against 54 distinct trials**, so the
+significance bar no longer moves on repetition, and the split now prints
+identical boundaries on every run.
+
+| # | status | how |
+| --- | --- | --- |
+| T1, T2 | **fixed** | Registry deduplicates on (hypothesis, params, split, dataset). `count()` is distinct trials; `executions()` keeps re-runs visible |
+| T3 | **fixed** | `--split-start` / `--split-end` pinned in the workflow, overridable only through repository variables so a change leaves a record |
+| T4 | **fixed** | `CostTable.fallback_rate()` gates KEEP at 25%; new verdict `cost gate rests on the fallback constant` |
+| T5 | **fixed** | Coverage gate at 20% checked *before* any statistic; new verdict `population too thinly covered to generalise`; `cov` column in the report |
+| T6 | **surfaced, not eliminated** | `measure` now reports labelled share by classification and warns when delisted names label at under half the listed rate. The bias is now measured rather than silent — removing it needs the delisted backfill to actually run |
+| T7 | **fixed** | `status` reports distinct trials, executions and last-measured; says so explicitly when `measure` has never completed |
+| T8 | **fixed** | `candidate_symbols()` returns every class a filer wrote; `normalise_symbol` still returns the first, so existing behaviour is unchanged |
+| T9 | **fixed** | Shared with T5 — the coverage column makes a 180-day candidate distinguishable from a full-window one |
+| T10 | **partially fixed** | `--capital` (default $25k) sizes positions so market impact is charged, and infeasible participation is counted. **Exit rules remain absent** — the horizons are fixed holding periods, which is a design choice rather than a rule |
+| T11 | **fixed** | `describe(window=...)`; an unstated window now prints `WINDOW UNSTATED` and a warning rather than a bare ratio |
+| T12 | **fixed** | Test asserts two entry days on one symbol produce different features, so a symbol-only memo key would fail |
+
+Two items are honestly incomplete. **T6** cannot be closed by code alone: the
+delisted symbols need fetching, and the local smoke run shows them labelling at
+0.0% against 0.3% for listed names. **T10** charges impact now but the system
+still has no exit rule beyond a fixed horizon.
+
+---
+
 ## Tigers — launch-blocking
 
 | # | Risk | Evidence | Mitigation | Decision by |

@@ -282,14 +282,24 @@ jobs:
       # fetching, and --limit because feature enrichment costs roughly a
       # millisecond per (symbol, day) pair and the event store is large.
       #
-      # Expect "too few trades" on most rows until the backfill covers the
-      # universe. That is the correct output for the data, not a failure: the
-      # sweep reporting a thin population is exactly what it is for.
+      # The split dates are PINNED and must not be edited casually. Derived
+      # boundaries move as events accumulate, which silently relocates the
+      # sealed holdout and changes train composition between runs -- results
+      # then are not comparable to each other, and the holdout is not a holdout.
+      # Overridable via repository variables only so a deliberate change leaves
+      # a record outside this file.
+      #
+      # Expect "too few trades" and "thin coverage" on most rows until the
+      # backfill covers the universe. That is the correct output for the data,
+      # not a failure: the sweep reporting a thin population is what it is for.
       - name: Measure the candidate backlog
         continue-on-error: true
         timeout-minutes: 20
         run: |
-          python -m tradezbotz measure --limit 40000
+          python -m tradezbotz measure \
+            --limit 40000 \
+            --split-start "${{ vars.SPLIT_START || '2016-01-01' }}" \
+            --split-end "${{ vars.SPLIT_END || '2026-06-30' }}"
 
       # `always()` so an interrupted or failed step still persists the work that
       # did complete. Losing hours of fetching to one bad step would be the worst

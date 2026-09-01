@@ -27,6 +27,7 @@ lottery ticket.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
 from dataclasses import dataclass, field
@@ -54,9 +55,16 @@ CREATE TABLE IF NOT EXISTS trials (
     kurtosis     REAL,
     outcome      TEXT    NOT NULL,
     notes        TEXT,
-    created_at   TEXT    NOT NULL
+    created_at   TEXT    NOT NULL,
+    -- Identity of the experiment, not of the execution. See `register`.
+    fingerprint  TEXT,
+    runs         INTEGER NOT NULL DEFAULT 1,
+    last_run_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_trials_hypothesis ON trials(hypothesis);
+-- The fingerprint index is created in _migrate, NOT here. On a database that
+-- predates the column, executescript runs before the ALTER TABLE and the index
+-- would reference a column that does not exist yet.
 
 -- Every holdout read is recorded. The holdout is only meaningful while it stays
 -- untouched, so a count above one per finalist is itself a finding.
@@ -98,7 +106,26 @@ class TrialRegistry:
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add the identity columns to a registry that predates them.
+
+        Existing rows keep fingerprint NULL, so they neither collide with new
+        trials nor get deduplicated retroactively. That is the honest handling:
+        those rows were real executions and we cannot now reconstruct which of
+        them were re-runs of each other.
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(trials)")}
+        for name, decl in (("fingerprint", "TEXT"),
+                           ("runs", "INTEGER NOT NULL DEFAULT 1"),
+                           ("last_run_at", "TEXT")):
+            if name not in have:
+                self._conn.execute(f"ALTER TABLE trials ADD COLUMN {name} {decl}")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trials_fingerprint "
+            "ON trials(fingerprint) WHERE fingerprint IS NOT NULL")
 
     def close(self) -> None:
         self._conn.close()
@@ -116,6 +143,7 @@ class TrialRegistry:
         *,
         params: dict[str, Any] | None = None,
         split: str = "train",
+        dataset: str = "",
     ) -> int:
         """Record a trial *before* running it, and return its id.
 
@@ -125,6 +153,25 @@ class TrialRegistry:
 
         A rationale is mandatory: a hypothesis with a stated mechanism carries a
         better prior than a mined pattern, and it can be falsified twice over.
+
+        **Re-running an identical trial updates it rather than appending.** The
+        Deflated Sharpe penalises the BREADTH of a search -- how many distinct
+        configurations were tried -- not how many times each was executed.
+        Testing one hypothesis on Monday and again on Tuesday is one hypothesis,
+        and counting it twice inflates N without any corresponding increase in
+        the opportunity to get lucky.
+
+        This mattered concretely. `measure` is a scheduled nightly job sweeping
+        ~200 candidate-horizon combinations, so appending on every execution
+        added ~6,000 phantom trials a month and raised the significance bar for
+        every real result with no new search having occurred.
+
+        Identity is (hypothesis, params, split, dataset). `dataset` is the
+        caller's fingerprint of the data the trial ran against: when the data
+        genuinely changes, the same hypothesis IS a new trial, because a second
+        look at fresh data is a second chance to get lucky. Passing "" opts out
+        and restores append-on-every-call, which is only correct for a caller
+        that has no stable notion of its dataset.
         """
         if not hypothesis.strip():
             raise TrialError("hypothesis name is required")
@@ -133,16 +180,42 @@ class TrialRegistry:
                 "a rationale is required: state the mechanism you expect to "
                 "produce returns, before seeing whether it does"
             )
+        now = datetime.now(timezone.utc).isoformat()
+        params_json = json.dumps(params or {}, sort_keys=True, default=str)
+        fingerprint = None
+        if dataset:
+            fingerprint = hashlib.sha256(
+                "\x1f".join((hypothesis.strip(), params_json, split, dataset))
+                .encode("utf-8")
+            ).hexdigest()
+            row = self._conn.execute(
+                "SELECT trial_id FROM trials WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+            if row is not None:
+                # Same experiment, same data, run again. Count the re-run for
+                # visibility but do not add to N.
+                self._conn.execute(
+                    "UPDATE trials SET runs = runs + 1, last_run_at = ?, "
+                    "outcome = ? WHERE trial_id = ?",
+                    (now, PENDING, int(row["trial_id"])),
+                )
+                self._conn.commit()
+                return int(row["trial_id"])
+
         cur = self._conn.execute(
             "INSERT INTO trials (hypothesis, rationale, params, split, outcome, "
-            "created_at) VALUES (?,?,?,?,?,?)",
+            "created_at, fingerprint, runs, last_run_at) "
+            "VALUES (?,?,?,?,?,?,?,1,?)",
             (
                 hypothesis.strip(),
                 rationale.strip(),
-                json.dumps(params or {}, sort_keys=True, default=str),
+                params_json,
                 split,
                 PENDING,
-                datetime.now(timezone.utc).isoformat(),
+                now,
+                fingerprint,
+                now,
             ),
         )
         self._conn.commit()
@@ -175,8 +248,18 @@ class TrialRegistry:
         self._conn.commit()
 
     def count(self) -> int:
-        """Total trials, including abandoned ones. This is N for the DSR."""
+        """Distinct trials, including abandoned ones. This is N for the DSR.
+
+        One row per (hypothesis, params, split, dataset), however many times it
+        has been executed -- see `register`. `executions` reports the raw count
+        for operational visibility.
+        """
         return int(self._conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0])
+
+    def executions(self) -> int:
+        """Total runs across all trials. Exceeds `count` when a sweep repeats."""
+        return int(self._conn.execute(
+            "SELECT COALESCE(SUM(runs), 0) FROM trials").fetchone()[0])
 
     def sharpes(self) -> list[float]:
         return [

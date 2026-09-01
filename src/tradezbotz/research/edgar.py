@@ -83,6 +83,33 @@ _VALID_SYMBOL = re.compile(r"^[A-Z][A-Z0-9]{0,6}(?:[.\-][A-Z0-9]{1,2})?$")
 _PLACEHOLDERS = {"NA", "N/A", "NONE", "-", "--", "---", "N.A.", "TBD", ""}
 
 
+def candidate_symbols(raw: str | None) -> list[str]:
+    """Every ticker a filer wrote in the symbol field, normalised.
+
+    Dual-class filings put two lines in one box -- "GEF,GEF.B", "PARAA,PARA".
+    `normalise_symbol` takes the first, which is right when nothing else is
+    known but wrong whenever the filer happened to write the illiquid class
+    first: PARAA is the class A line and PARA is the one that trades.
+
+    This returns all of them so a caller with liquidity data can choose. Order
+    is as written, so `candidate_symbols(x)[0] == normalise_symbol(x)`.
+    """
+    if not raw:
+        return []
+    text = raw.strip().upper()
+    if text in _PLACEHOLDERS:
+        return []
+    text = text.strip("\"'()[]{}<> 	")
+    text = _EXCHANGE_PREFIX.sub("", text)
+    text = _EXCHANGE_SUFFIX.sub("", text)
+    out = []
+    for part in _SPLIT_ON.split(text):
+        cleaned = normalise_symbol(part)
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
 def normalise_symbol(raw: str | None) -> str:
     """Extract a usable ticker from the free-text issuer symbol field.
 

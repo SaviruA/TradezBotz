@@ -78,6 +78,8 @@ class Verdict:
     OUTLIER_DEPENDENT = "rests on a few outliers"
     NOT_SIGNIFICANT = "not significant after trials and dependence"
     TOO_FEW_TRADES = "too few trades to measure"
+    COST_NOT_MEASURED = "cost gate rests on the fallback constant"
+    THIN_COVERAGE = "population too thinly covered to generalise"
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,12 @@ class Assessment:
     #: control was not run" and "the control was run and matched" are opposite
     #: readings of the same blank column.
     control_note: str = ""
+    #: Share of the event population that was labellable, and share of trades
+    #: charged the fallback cost. Carried on the assessment rather than printed
+    #: once, because a reader comparing two rows needs to know they were
+    #: measured on the same footing.
+    coverage: float = 1.0
+    fallback_share: float = 0.0
 
     @property
     def kept(self) -> bool:
@@ -106,6 +114,20 @@ CONTROL_TOLERANCE = 0.7
 
 #: Below this many trades the statistics say nothing, whatever they print.
 MIN_TRADES = 30
+
+#: Share of trades whose cost came from the fallback constant rather than from a
+#: spread estimate, above which the cost gate is not a measurement.
+#:
+#: `survives_costs` decides KEEP. If most trades were charged a flat 93bps that
+#: somebody chose, then KEEP is a statement about that constant rather than
+#: about the strategy. A quarter is already generous.
+MAX_FALLBACK_SHARE = 0.25
+
+#: Share of the candidate population that must actually have been labellable.
+#: A result computed on 0.3% of events is a result about whichever symbols
+#: happened to be in the price cache, and the first candidate to clear the
+#: trade floor would be selected by data availability rather than by edge.
+MIN_COVERAGE = 0.20
 
 #: Partition name for the sealed out-of-sample window. Matched by string because
 #: that is what `run` records on the trial, and a typo here should fail loudly
@@ -151,15 +173,33 @@ def _require_holdout_declared(candidates: Sequence[Candidate],
     )
 
 
-def judge(result: BacktestResult, control: BacktestResult | None) -> str:
+def judge(result: BacktestResult, control: BacktestResult | None,
+          *, fallback_share: float = 0.0, coverage: float = 1.0) -> str:
     """Apply the disqualifying gates, in the order they can disqualify.
 
     Order matters for readability rather than correctness: a strategy with no
     gross edge should be reported as having no edge, not as failing a cost test
     it never reached.
+
+    The two gates before any statistic is read are about whether the numbers
+    mean anything at all:
+
+    **Coverage.** A result computed on a fraction of the population describes
+    whichever symbols happened to be in the price cache. Without this gate the
+    first candidate to clear the trade floor is selected by data availability,
+    and it would be reported identically to one selected by edge.
+
+    **Cost provenance.** `survives_costs` decides KEEP, and when most trades are
+    charged the fallback constant, KEEP is a claim about that constant. Both are
+    reported as distinct verdicts rather than folded into "not significant",
+    because the fix for each is to get more data, not to abandon the hypothesis.
     """
+    if coverage < MIN_COVERAGE:
+        return Verdict.THIN_COVERAGE
     if result.n_trades < MIN_TRADES:
         return Verdict.TOO_FEW_TRADES
+    if result.costed and fallback_share > MAX_FALLBACK_SHARE:
+        return Verdict.COST_NOT_MEASURED
     if result.mean_return <= 0:
         return Verdict.NO_EDGE
     if result.costed and not result.survives_costs:
@@ -189,6 +229,9 @@ def sweep(
     costs: Callable[[Label], float] | None = None,
     with_controls: bool = True,
     partition: str = "train",
+    dataset: str = "",
+    coverage: float = 1.0,
+    fallback_share: float = 0.0,
 ) -> list[Assessment]:
     """Measure every runnable candidate at every horizon.
 
@@ -214,6 +257,7 @@ def sweep(
                 hypothesis=cand.name, rationale=cand.rationale,
                 registry=registry, selector=cand.selector,
                 horizon=horizon, partition=partition, costs=costs,
+                dataset=dataset,
             )
             control, note = None, ""
             if with_controls and cand.controlled:
@@ -240,14 +284,18 @@ def sweep(
                                   "equally the edge belongs to the population",
                         registry=registry, selector=negate(cand.selector),
                         horizon=horizon, partition=partition, costs=costs,
+                        dataset=dataset,
                     )
                 else:
                     note = (f"complement holds {n_complement} trades, below the "
                             f"{MIN_TRADES} floor; no control run")
             elif with_controls:
                 note = "control not meaningful for this candidate"
-            out.append(Assessment(cand.name, horizon, result, control,
-                                  judge(result, control), note))
+            out.append(Assessment(
+                cand.name, horizon, result, control,
+                judge(result, control, fallback_share=fallback_share,
+                      coverage=coverage),
+                note, coverage, fallback_share))
     return out
 
 
@@ -262,7 +310,7 @@ def report(assessments: Sequence[Assessment],
     lines: list[str] = []
     header = (
         f"{'candidate':<30}{'h':>3}{'trades':>8}{'mean':>9}{'net':>9}"
-        f"{'t(cl)':>7}{'DSR':>7}  verdict"
+        f"{'t(cl)':>7}{'DSR':>7}{'cov':>6}  verdict"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -274,13 +322,31 @@ def report(assessments: Sequence[Assessment],
         lines.append(
             f"{a.name[:29]:<30}{a.horizon:>3}{r.n_trades:>8,}"
             f"{r.mean_return:>+9.2%}{net:>9}"
-            f"{r.t_stat_clustered:>+7.2f}{r.deflated_sharpe:>7.3f}  {a.verdict}"
+            f"{r.t_stat_clustered:>+7.2f}{r.deflated_sharpe:>7.3f}"
+            f"{a.coverage:>6.0%}  {a.verdict}"
         )
 
     kept = [a for a in assessments if a.kept]
     lines.append("")
     lines.append(f"{len(kept)} of {len(assessments)} measurements survived "
                  f"every gate.")
+
+    # Provenance, stated once and prominently. A reader who does not know that
+    # the cost figures came from a constant will read `net` as a measurement.
+    if assessments:
+        cov = assessments[0].coverage
+        fb = assessments[0].fallback_share
+        lines.append("")
+        lines.append(f"coverage {cov:.1%} of the event population; "
+                     f"{fb:.0%} of trades charged the fallback cost constant.")
+        if cov < MIN_COVERAGE:
+            lines.append(f"  Below the {MIN_COVERAGE:.0%} floor: every row above "
+                         "describes whichever symbols happened to be cached, so "
+                         "nothing here is a finding about a strategy.")
+        if fb > MAX_FALLBACK_SHARE:
+            lines.append(f"  Above the {MAX_FALLBACK_SHARE:.0%} fallback ceiling: "
+                         "the cost gate is reporting a chosen constant, not a "
+                         "measured spread.")
 
     # A missing control reads as "no control needed" unless it says otherwise,
     # and those are opposite claims about the same empty column.

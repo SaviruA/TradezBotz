@@ -414,16 +414,23 @@ class CostTable:
 
     def __init__(self, cache, *, model: "CostModel | None" = None,
                  basis: str | None = None,
-                 fallback_bps: float = FALLBACK_COST_BPS) -> None:
+                 fallback_bps: float = FALLBACK_COST_BPS,
+                 capital_per_trade: float = 0.0) -> None:
         self.cache = cache
         self.model = model or CostModel()
         self.basis = basis
         self.fallback = fallback_bps / 10_000
+        #: Notional per position. Zero means participation is zero and market
+        #: impact is never charged, which makes every net return an upper bound
+        #: on performance rather than an estimate of it. Supplying a size is
+        #: what converts the spread-only figure into a costed one.
+        self.capital_per_trade = capital_per_trade
         self._series: dict[str, object] = {}
         self._memo: dict[tuple[str, int, int], float] = {}
         self.estimated = 0
         self.fell_back = 0
         self.upper_bound = 0
+        self.infeasible = 0
 
     def _bars(self, symbol: str, before: "date"):
         from datetime import timedelta
@@ -458,20 +465,46 @@ class CostTable:
             self._memo[key] = self.fallback
             return self.fallback
 
-        cost = self.model.estimate(bars)
+        # Size the position so market impact is actually charged. Priced off
+        # the fill, which is the price the trade genuinely paid -- this is a
+        # cost calculation, not a signal, so using the entry price is correct
+        # rather than lookahead.
+        shares = 0.0
+        if self.capital_per_trade and label.entry_price:
+            shares = self.capital_per_trade / label.entry_price
+
+        cost = self.model.estimate(bars, shares=shares)
         self.estimated += 1
         if cost.spread_is_upper_bound:
             self.upper_bound += 1
+        if not cost.feasible:
+            self.infeasible += 1
         self._memo[key] = cost.total
         return cost.total
 
-    def summary(self) -> str:
+    def fallback_rate(self) -> float:
+        """Share of charges that used the constant rather than an estimate.
+
+        The number that decides whether the cost gate is a measurement. Exposed
+        separately from `summary` because `sweep.judge` gates on it.
+        """
         total = self.estimated + self.fell_back
-        share = self.fell_back / total if total else 0.0
-        return (
+        return self.fell_back / total if total else 0.0
+
+    def summary(self) -> str:
+        sized = (f"{self.capital_per_trade:,.0f} per position, impact charged"
+                 if self.capital_per_trade else
+                 "UNSIZED: no capital given, so market impact is zero and every "
+                 "net return is an upper bound")
+        line = (
             f"costs: {self.estimated:,} (symbol, month) estimates, "
             f"{self.fell_back:,} fell back to {FALLBACK_COST_BPS:.0f}bps "
-            f"({share:.1%} of charges); {self.upper_bound:,} estimates sit in "
-            f"the regime where EDGE reads high and are upper bounds, not "
-            f"measurements"
+            f"({self.fallback_rate():.1%} of charges); {self.upper_bound:,} "
+            f"estimates sit in the regime where EDGE reads high and are upper "
+            f"bounds, not measurements\n  sizing: {sized}"
         )
+        if self.infeasible:
+            line += (f"\n  {self.infeasible:,} positions exceed "
+                     f"{self.model.max_participation:.0%} of daily volume and "
+                     "are not executable in one session")
+        return line

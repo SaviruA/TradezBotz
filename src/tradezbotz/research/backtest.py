@@ -289,17 +289,22 @@ def run(
     partition: str = "train",
     trades_per_year: float | None = None,
     costs: "Callable[[Label], float] | None" = None,
+    dataset: str = "",
 ) -> BacktestResult:
     """Measure one hypothesis over labelled events.
 
     The trial is registered *before* the result is known, so an experiment
     abandoned midway still counts against N.
     """
+    # `dataset` makes the trial's identity include the data it ran against, so a
+    # nightly re-run of the same sweep updates one trial rather than appending a
+    # new one and inflating N. See TrialRegistry.register.
     trial_id = registry.register(
         hypothesis,
         rationale,
         params={"horizon": horizon, "partition": partition},
         split=partition,
+        dataset=dataset,
     )
 
     pairs = list(zip(payloads, labels))
