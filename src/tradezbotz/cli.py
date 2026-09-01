@@ -1041,8 +1041,7 @@ def cmd_runlog(args: argparse.Namespace) -> int:
         text, unhealthy = describe(log)
         print(text)
         if unhealthy and args.strict:
-            print("
-pipeline health check FAILED", file=sys.stderr)
+            print("\npipeline health check FAILED", file=sys.stderr)
             return 1
         return 0
     finally:
