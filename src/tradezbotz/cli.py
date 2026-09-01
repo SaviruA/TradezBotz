@@ -31,6 +31,9 @@ PROFILES_DB = "profiles.db"
 TRIALS_DB = "trials.db"
 #: Cached SEC XBRL company facts, one gzipped row per issuer.
 FACTS_DB = "facts.db"
+#: Alpaca's US equity asset list, including inactive listings. What makes
+#: "delisted" distinguishable from "never existed" and from "OTC".
+ASSETS_DB = "assets.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -307,6 +310,31 @@ def cmd_enqueue_symbols(args: argparse.Namespace) -> int:
     symbols = symbols_from_events(labellable)
     store.close()
 
+    # OTC names return zero bars on the SIP feed rather than an error, and the
+    # `otc` feed is 403 on this plan -- both verified by probe. So they cost a
+    # request each and land in the same "no data" bucket as a genuine gap.
+    #
+    # Skipping is opt-in, not the default. A name on OTC today may have been
+    # listed for most of the window, and its history is real and already
+    # fetched; excluding on today's tag would delete data we hold and introduce
+    # survivorship bias in a cleanup step.
+    assets_path = DEFAULT_STATE / ASSETS_DB
+    if assets_path.exists():
+        from .research.assets import OTC, AssetCatalog, describe
+
+        catalog = AssetCatalog(assets_path)
+        if catalog.count():
+            print(f"universe composition ({len(symbols):,} symbols):")
+            print(describe(catalog.breakdown(symbols)))
+            if args.skip_otc:
+                before = len(symbols)
+                symbols = [s for s in symbols if catalog.classify(s) != OTC]
+                print(f"\n--skip-otc dropped {before - len(symbols):,} symbols")
+        catalog.close()
+    elif args.skip_otc:
+        print("--skip-otc ignored: no asset catalog yet, run ingest-assets",
+              file=sys.stderr)
+
     runner = _make_runner(need_source=False)
     added = runner.enqueue(symbols)
     print(
@@ -544,6 +572,25 @@ def cmd_status(args: argparse.Namespace) -> int:
         store.close()
     else:
         print("intraday sessions: none")
+
+    assets_path = DEFAULT_STATE / ASSETS_DB
+    if assets_path.exists():
+        from .research.assets import AssetCatalog, describe
+        from .research.eventstore import EventStore as _ES
+
+        catalog = AssetCatalog(assets_path)
+        events_path2 = DEFAULT_STATE / EVENTS_DB
+        if catalog.count() and events_path2.exists():
+            st = _ES(events_path2)
+            syms = [r[0] for r in st._conn.execute(
+                "SELECT DISTINCT symbol FROM events WHERE kind = ? "
+                "AND symbol IS NOT NULL", (KIND_INSIDER,))]
+            st.close()
+            print(f"universe          : {len(syms):,} symbols")
+            print(describe(catalog.breakdown(syms)))
+        catalog.close()
+    else:
+        print("universe          : unclassified; run ingest-assets")
 
     ckpt = DEFAULT_STATE / CHECKPOINT_DB
     if ckpt.exists():
@@ -939,6 +986,68 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_ingest_assets(args: argparse.Namespace) -> int:
+    """Refresh the local asset catalog and report universe composition.
+
+    One request returns all 33,468 US equities including inactive ones, so this
+    costs seconds and is worth running every pipeline pass -- an asset's status
+    changes and the current answer is the one wanted.
+    """
+    from .research.assets import (
+        RESOLVE_PER_MINUTE,
+        UNKNOWN,
+        AssetCatalog,
+        describe,
+        fetch_assets,
+        resolve_unknown,
+    )
+    from .research.eventstore import EventStore
+
+    catalog = AssetCatalog(DEFAULT_STATE / ASSETS_DB)
+    if not args.resolve_only:
+        n = catalog.put_many(fetch_assets())
+        print(f"catalog refreshed: {n:,} US equities")
+
+    events_path = DEFAULT_STATE / EVENTS_DB
+    if not events_path.exists():
+        catalog.close()
+        return 0
+
+    store = EventStore(events_path)
+    symbols = [
+        r[0] for r in store._conn.execute(
+            "SELECT DISTINCT symbol FROM events "
+            "WHERE kind = ? AND symbol IS NOT NULL", (KIND_INSIDER,))
+    ]
+    store.close()
+
+    print(f"\nuniverse composition ({len(symbols):,} distinct symbols):")
+    print(describe(catalog.breakdown(symbols)))
+
+    # The bulk list omits recently delisted names -- the exact bucket a
+    # survivorship check depends on. Without this pass the composition above
+    # reports them as `unknown` and survivorship reads far too high.
+    if args.resolve:
+        absent = catalog.known_absent()
+        pending = sum(1 for s in symbols
+                      if catalog.classify(s) == UNKNOWN and s.upper() not in absent)
+        print(f"\nresolving {pending:,} unclassified symbols individually "
+              f"(~{pending / RESOLVE_PER_MINUTE:.0f} min at "
+              f"{RESOLVE_PER_MINUTE}/min)")
+        stats = resolve_unknown(
+            catalog, symbols, limit=args.resolve_limit,
+            on_progress=lambda i, n, st: print(
+                f"  {i:,}/{n:,}  resolved {st['resolved']:,}  "
+                f"absent {st['absent']:,}", flush=True))
+        print(f"  resolved {stats['resolved']:,}, confirmed absent "
+              f"{stats['absent']:,}, failed {stats['failed']:,}")
+        print("\nuniverse composition after resolution:")
+        print(describe(catalog.breakdown(symbols)))
+
+    catalog.close()
+    return 0
+
+
 def cmd_repair_symbols(args: argparse.Namespace) -> int:
     """Re-normalise issuer tickers already in the event store.
 
@@ -1324,6 +1433,12 @@ def build_parser() -> argparse.ArgumentParser:
                          help="queue symbols from events that can actually be labelled")
     enq.add_argument("--buys-only", action="store_true",
                      help="queue only symbols with an open-market purchase")
+    enq.add_argument("--skip-otc", action="store_true",
+                     help="drop symbols the asset catalog marks OTC. Off by "
+                          "default on purpose: a name on OTC today may have "
+                          "been listed during the window, and its history is "
+                          "real. Skipping on today's tag deletes data we hold "
+                          "and introduces survivorship bias in the cleanup step")
     enq.add_argument("--price-window", type=int, default=PRICE_WINDOW_DAYS,
                      help=f"days of price history available (default {PRICE_WINDOW_DAYS})")
     enq.set_defaults(func=cmd_enqueue_symbols)
@@ -1461,6 +1576,19 @@ def build_parser() -> argparse.ArgumentParser:
                          "default -- this is for diagnosing the sweep, not for "
                          "producing a finding")
     ms.set_defaults(func=cmd_measure, features=True, costs=True, joins=True)
+
+    ast = sub.add_parser("ingest-assets",
+                         help="refresh the asset catalog; classifies the "
+                              "universe as listed / delisted / OTC / unknown")
+    ast.add_argument("--resolve", action="store_true",
+                     help="look up symbols the bulk list omits, one request "
+                          "each. The bulk list drops recently delisted names, "
+                          "which is exactly the bucket survivorship depends on")
+    ast.add_argument("--resolve-only", action="store_true",
+                     help="skip the bulk refresh and only resolve gaps")
+    ast.add_argument("--resolve-limit", type=int, default=0,
+                     help="cap lookups this run; the catalog is incremental")
+    ast.set_defaults(func=cmd_ingest_assets)
 
     rep = sub.add_parser("repair-symbols",
                          help="re-normalise issuer tickers already stored")

@@ -173,6 +173,27 @@ jobs:
       - name: Snapshot Reddit sentiment
         run: python -m tradezbotz ingest-sentiment
 
+      # Classify the universe: listed / delisted / OTC / unknown. One request
+      # for the bulk list, then per-symbol lookups for what it omits.
+      #
+      # That second half is not optional. The bulk list silently drops recently
+      # delisted names while the per-symbol endpoint still answers for them, so
+      # reading only the bulk list put 1,001 real companies (LEG, CMA, ALTR,
+      # ITCI) into "unknown" and reported 99.5% survivorship. Resolving moved
+      # 641 into "delisted" and brought it to 84.4%. The error direction is the
+      # dangerous one -- it makes a universe look healthier than it is, which is
+      # the same direction survivorship bias runs.
+      #
+      # Incremental: resolved symbols and confirmed 404s are both cached, so
+      # steady state is one request.
+      - name: Classify the symbol universe
+        continue-on-error: true
+        env:
+          ALPACA_PAPER_API_KEY: ${{ secrets.ALPACA_PAPER_API_KEY }}
+          ALPACA_PAPER_API_SECRET: ${{ secrets.ALPACA_PAPER_API_SECRET }}
+        run: |
+          python -m tradezbotz ingest-assets --resolve --resolve-limit 2000
+
       # Issuer tickers arrive as free text and filers treat them as such:
       # "NYSE: KRC", "(SIRI)", "GEF,GEF.B", "N O G". Measured over 4,740
       # distinct symbols, 50 were unusable as written and failed the price
