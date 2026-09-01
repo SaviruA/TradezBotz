@@ -263,6 +263,63 @@ def blocked_candidates() -> list[Candidate]:
             blocked_by="persistence gate has not been run over enough ingested "
                        "quarters to rank filers",
         ),
+        # --- the large-cap valuation track -----------------------------------
+        #
+        # A deliberate second universe, and the first thing here that is not a
+        # microcap insider hypothesis. The five standard multiples are built and
+        # tested in `fundamentals.py`; what blocks them is not the ratios and
+        # not the data, it is the SHAPE of the question.
+        #
+        # Everything else in this file is an event study: something happened on
+        # a date, measure what followed. A valuation multiple is cross-sectional
+        # -- rank the universe, hold the cheapest slice, rebalance -- and there
+        # is no event to hang it on. The engine can express it, but only once a
+        # rebalance-date population exists: one row per (symbol, month-end)
+        # carrying that date's multiples and the symbol's quintile within the
+        # universe. That is the missing piece, and it is the same piece for all
+        # four.
+        Candidate(
+            "large cap: EV/EBITDA cheapest quintile", everything,
+            "The enterprise multiple. Loughran & Wellman (JFQA 2011) build a "
+            "factor from it earning 5.28%/yr; Gray & Vogel (JPM 2012) race it "
+            "against P/E, book-to-market and FCF/TEV over forty years and it "
+            "wins.",
+            prior="the best-evidenced multiple we have found, and the most "
+                  "arbitraged segment to run it in -- those two cancel to an "
+                  "unknown, which is the honest answer",
+            blocked_by="no rebalance-date event population; needs one row per "
+                       "(symbol, month-end) with multiples and universe rank",
+        ),
+        Candidate(
+            "large cap: P/FCF cheapest quintile", everything,
+            "Cash is materially harder to manage than net income, and "
+            "operating cash flow is the best-tagged number in XBRL at every "
+            "size band.",
+            prior="weaker than EV/EBITDA on the Gray & Vogel evidence, better "
+                  "covered in the data. Worth measuring for the coverage alone",
+            blocked_by="no rebalance-date event population",
+        ),
+        Candidate(
+            "large cap: trailing P/E cheapest quintile", everything,
+            "The textbook multiple, usable here only because the universe "
+            "moved: P/E is defined for 86% of filers over $10B of revenue "
+            "against 23% under $100M.",
+            prior="no edge. This is the single most-screened number in "
+                  "existence, on the most-analysed segment of the market",
+            blocked_by="no rebalance-date event population",
+        ),
+        Candidate(
+            "large cap: forward P/E", everything,
+            "The one member of the standard five that no choice of universe "
+            "unlocks.",
+            prior="untestable rather than unpromising, and those must not be "
+                  "reported the same way",
+            blocked_by="needs point-in-time analyst consensus. Large caps have "
+                       "abundant coverage; we have no historical record of what "
+                       "it said, and using today's estimates on a past date is "
+                       "the same lookahead that rules out Yahoo for reported "
+                       "figures. A vendor problem, not a data-availability one",
+        ),
         Candidate(
             "P/S with growth", everything,
             "Sales multiple against sales growth, on XBRL facts filtered by "

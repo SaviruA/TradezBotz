@@ -32,6 +32,25 @@ analyst estimates are not available free, so any historical use would be
 lookahead again. `value_growth_score` keeps the idea -- valuation relative to
 growth -- with P/S over trailing revenue growth, both computable from filings
 alone. It is a different number from PEG and is deliberately not called one.
+
+**The large-cap multiples, and why they are here.** P/E, P/FCF and EV/EBITDA are
+built despite the argument above, because they are the right tools on a large-cap
+universe and that universe is now in scope. The argument above is not withdrawn
+-- it is scoped. P/E is undefined for 77% of filers under $100M of revenue and
+for 14% of those over $10B, so the same metric is a selection bias at one end of
+the market and the standard measure at the other.
+
+`COVERAGE_BY_BAND` below carries the measured availability for each, and
+`size_band` / `guard_single_band` exist so a result cannot silently pool bands
+whose transaction costs differ by an order of magnitude.
+
+**Forward P/E is not here and cannot be.** It is the one member of the standard
+five that no choice of universe unlocks: it needs analyst consensus estimates,
+which are not available free at a point in time, and using today's estimates to
+judge a past decision is the same back-door lookahead that rules out Yahoo and
+Macrotrends for reported figures. Large caps have plenty of analyst coverage;
+we have no point-in-time record of what that coverage said. Those are different
+problems and only the first one is fixed by moving up the size distribution.
 """
 
 from __future__ import annotations
@@ -64,6 +83,33 @@ REVENUE_CONCEPTS = (
 GROSS_PROFIT_CONCEPTS = ("GrossProfit",)
 NET_INCOME_CONCEPTS = ("NetIncomeLoss", "ProfitLoss")
 OPERATING_INCOME_CONCEPTS = ("OperatingIncomeLoss",)
+
+#: EBITDA is not a GAAP tag and never will be -- it is a non-GAAP construct, so
+#: it has to be assembled from operating income plus depreciation and
+#: amortisation. Two D&A tags because filers split roughly 3,034 to 357 between
+#: them and neither alone is sufficient.
+DA_CONCEPTS = (
+    "DepreciationDepletionAndAmortization",
+    "DepreciationAmortizationAndAccretionNet",
+    "DepreciationAndAmortization",
+)
+
+#: Free cash flow inputs. Operating cash flow is the best-tagged number in all
+#: of XBRL -- 98.8% of small filers report it, better than net income -- and
+#: capex is the constraint at 65.2%.
+OPERATING_CASH_FLOW_CONCEPTS = ("NetCashProvidedByUsedInOperatingActivities",
+                                "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations")
+CAPEX_CONCEPTS = ("PaymentsToAcquirePropertyPlantAndEquipment",
+                  "PaymentsToAcquireProductiveAssets")
+
+#: Enterprise value inputs. Both are balance-sheet quantities, so they are read
+#: with `latest` rather than summed over twelve months.
+CASH_CONCEPTS = (
+    "CashAndCashEquivalentsAtCarryingValue",
+    "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+)
+DEBT_CONCEPTS = ("LongTermDebt", "LongTermDebtNoncurrent")
+DEBT_CURRENT_CONCEPTS = ("LongTermDebtCurrent", "DebtCurrent")
 SHARES_CONCEPTS = (
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
@@ -249,6 +295,50 @@ class Snapshot:
     operating_income_ttm: float | None
     shares_outstanding: float | None
     revenue_prior_ttm: float | None = None
+    #: EBITDA and FCF inputs. All None-able, because the tags they need are the
+    #: least reliably reported ones in XBRL and a guess here would propagate
+    #: into a ratio that looks like a measurement.
+    depreciation_amortisation_ttm: float | None = None
+    operating_cash_flow_ttm: float | None = None
+    capex_ttm: float | None = None
+    #: Balance-sheet quantities, read at a point in time rather than summed.
+    cash: float | None = None
+    debt: float | None = None
+    #: True when at least one debt tag was found. Distinguishes "this company
+    #: reported no debt" from "this company did not tag its debt", which XBRL
+    #: itself does not distinguish and which `debt = 0.0` would silently
+    #: conflate -- understating enterprise value for exactly the filers whose
+    #: tagging is weakest.
+    debt_reported: bool = False
+
+    @property
+    def ebitda_ttm(self) -> float | None:
+        """Operating income plus D&A.
+
+        The conventional construction, and the reason EV/EBITDA is expensive to
+        compute here: EBITDA is non-GAAP, so both halves must be tagged. Only
+        39.8% of small filers and 52.9% of the largest have both.
+        """
+        if self.operating_income_ttm is None or self.depreciation_amortisation_ttm is None:
+            return None
+        return self.operating_income_ttm + self.depreciation_amortisation_ttm
+
+    @property
+    def free_cash_flow_ttm(self) -> float | None:
+        """Operating cash flow minus capital expenditure.
+
+        Capex is reported as a positive outflow in XBRL, so it is subtracted.
+        Getting that sign backwards would turn a cash-burning company into the
+        cheapest name in the screen.
+        """
+        if self.operating_cash_flow_ttm is None or self.capex_ttm is None:
+            return None
+        return self.operating_cash_flow_ttm - abs(self.capex_ttm)
+
+    def market_cap(self, price: float) -> float | None:
+        if not self.shares_outstanding or price <= 0:
+            return None
+        return price * self.shares_outstanding
 
     @property
     def gross_margin(self) -> float | None:
@@ -305,6 +395,70 @@ class Snapshot:
             return None
         return ps / (growth * 100.0)
 
+    def price_to_earnings(self, price: float) -> float | None:
+        """Trailing P/E. Undefined on negative earnings, deliberately.
+
+        Returning None rather than a negative number is the whole point: a
+        negative P/E sorts *below* every cheap profitable company, so a naive
+        "lowest P/E" screen fills up with loss-makers. On our microcap universe
+        that is 77% of the population; on filers over $10B of revenue it is
+        14%, which is why this only becomes usable at the large end.
+        """
+        if not self.net_income_ttm or not self.shares_outstanding:
+            return None
+        if self.net_income_ttm <= 0 or self.shares_outstanding <= 0 or price <= 0:
+            return None
+        return (price * self.shares_outstanding) / self.net_income_ttm
+
+    def price_to_free_cash_flow(self, price: float) -> float | None:
+        """Market cap over trailing free cash flow.
+
+        The best-covered of the cash-based multiples -- operating cash flow is
+        tagged more reliably than net income at every size band -- and the
+        hardest of them to manage, since accruals cannot move it.
+
+        None on non-positive FCF for the same reason as P/E: a cash-burning
+        company must not sort as the cheapest.
+        """
+        cap = self.market_cap(price)
+        fcf = self.free_cash_flow_ttm
+        if cap is None or fcf is None or fcf <= 0:
+            return None
+        return cap / fcf
+
+    def enterprise_value(self, price: float) -> float | None:
+        """Market cap plus debt minus cash.
+
+        Requires `debt_reported`. Treating an untagged balance sheet as
+        debt-free would understate EV for precisely the filers least likely to
+        tag it, producing a screen that rewards poor disclosure.
+        """
+        cap = self.market_cap(price)
+        if cap is None or not self.debt_reported or self.cash is None:
+            return None
+        return cap + (self.debt or 0.0) - self.cash
+
+    def ev_to_ebitda(self, price: float) -> float | None:
+        """The multiple with the strongest evidence behind it.
+
+        Loughran & Wellman (JFQA 2011) build an enterprise-multiple factor
+        earning 5.28% a year; Gray & Vogel (JPM 2012) race the metrics over
+        forty years and EBITDA/TEV wins, beating P/E, book-to-market and
+        FCF/TEV.
+
+        The evidence is not the constraint here -- coverage is. Measured on the
+        SEC frames API for CY2024, this is computable for 13.6% of filers under
+        $100M of revenue and 41.9% of those over $10B. Even at the top of the
+        market it is a minority, because the largest filers include banks and
+        insurers for whom operating income and capex do not mean what this
+        formula assumes.
+        """
+        ev = self.enterprise_value(price)
+        ebitda = self.ebitda_ttm
+        if ev is None or ebitda is None or ebitda <= 0 or ev <= 0:
+            return None
+        return ev / ebitda
+
 
 def snapshot(client: XbrlClient, cik: str | int, as_of: date,
              facts: dict | None = None) -> Snapshot:
@@ -319,6 +473,16 @@ def snapshot(client: XbrlClient, cik: str | int, as_of: date,
     shares_facts = extract(raw, SHARES_CONCEPTS, unit="shares")
     latest_shares = latest(shares_facts, as_of)
 
+    # Balance-sheet quantities: a position on a date, not a flow over a period,
+    # so `latest` rather than `trailing_twelve_months`.
+    latest_cash = latest(extract(raw, CASH_CONCEPTS), as_of)
+    debt_long = latest(extract(raw, DEBT_CONCEPTS), as_of)
+    debt_short = latest(extract(raw, DEBT_CURRENT_CONCEPTS), as_of)
+    debt_total = None
+    if debt_long is not None or debt_short is not None:
+        debt_total = (debt_long.value if debt_long else 0.0) + \
+                     (debt_short.value if debt_short else 0.0)
+
     return Snapshot(
         cik=str(cik),
         as_of=as_of,
@@ -329,7 +493,100 @@ def snapshot(client: XbrlClient, cik: str | int, as_of: date,
             extract(raw, OPERATING_INCOME_CONCEPTS), as_of),
         shares_outstanding=latest_shares.value if latest_shares else None,
         revenue_prior_ttm=trailing_twelve_months(revenue, prior_cut),
+        depreciation_amortisation_ttm=trailing_twelve_months(
+            extract(raw, DA_CONCEPTS), as_of),
+        operating_cash_flow_ttm=trailing_twelve_months(
+            extract(raw, OPERATING_CASH_FLOW_CONCEPTS), as_of),
+        capex_ttm=trailing_twelve_months(extract(raw, CAPEX_CONCEPTS), as_of),
+        cash=latest_cash.value if latest_cash else None,
+        debt=debt_total,
+        debt_reported=debt_total is not None,
     )
+
+
+# --- size bands ------------------------------------------------------------------
+#
+# The five-multiple toolkit is calibrated on large caps and mostly undefined
+# below them, so the universe a ratio is computed on is part of the result
+# rather than a detail of it. These bands exist so that fact stays in the data.
+
+#: Market-cap floors, in dollars. Conventional US definitions; the boundaries
+#: are arbitrary in the way all such boundaries are, which is why the band
+#: travels with the result rather than being hardcoded into a filter.
+MICRO_CAP_CEILING = 300_000_000
+SMALL_CAP_CEILING = 2_000_000_000
+MID_CAP_CEILING = 10_000_000_000
+LARGE_CAP_CEILING = 200_000_000_000
+
+BAND_MICRO = "micro"
+BAND_SMALL = "small"
+BAND_MID = "mid"
+BAND_LARGE = "large"
+BAND_MEGA = "mega"
+
+#: Where each multiple is computable, measured on the SEC frames API for CY2024
+#: by revenue band (a proxy for size, since frames carries no market cap).
+#: Recorded here because the numbers are the argument and they should not have
+#: to be rediscovered.
+#:
+#:     band              n     P/E defined   FCF    EBITDA   EV/EBITDA
+#:     revenue <$100M    1,991     23.4%    61.9%    38.2%     13.6%
+#:     $100M - $1B       1,217     49.1%    73.8%    56.2%     33.4%
+#:     $1B - $10B        1,217     73.3%    69.2%    62.5%     48.0%
+#:     over $10B           427     85.7%    65.8%    52.9%     41.9%
+#:
+#: Two things in that table are worth more than the headline. First, moving up
+#: the size distribution fixes P/E dramatically (23% to 86%) and does NOT fix
+#: EV/EBITDA (14% to 42%) -- it remains a minority even among the largest
+#: filers, because that band is thick with banks and insurers for whom
+#: operating income and capex do not mean what the formula assumes. Second,
+#: three of the four metrics PEAK in the $1B-$10B band rather than at the top,
+#: so "bigger is better" is false past mid-cap.
+COVERAGE_BY_BAND = {
+    "revenue <$100M": {"pe": 0.234, "fcf": 0.619, "ebitda": 0.382, "ev_ebitda": 0.136},
+    "$100M-$1B": {"pe": 0.491, "fcf": 0.738, "ebitda": 0.562, "ev_ebitda": 0.334},
+    "$1B-$10B": {"pe": 0.733, "fcf": 0.692, "ebitda": 0.625, "ev_ebitda": 0.480},
+    "over $10B": {"pe": 0.857, "fcf": 0.658, "ebitda": 0.529, "ev_ebitda": 0.419},
+}
+
+
+def size_band(market_cap: float | None) -> str | None:
+    """Which size band a market capitalisation falls in."""
+    if market_cap is None or market_cap <= 0:
+        return None
+    if market_cap < MICRO_CAP_CEILING:
+        return BAND_MICRO
+    if market_cap < SMALL_CAP_CEILING:
+        return BAND_SMALL
+    if market_cap < MID_CAP_CEILING:
+        return BAND_MID
+    if market_cap < LARGE_CAP_CEILING:
+        return BAND_LARGE
+    return BAND_MEGA
+
+
+def guard_single_band(bands: Sequence[str | None]) -> None:
+    """Refuse a study that silently mixes size bands.
+
+    Not pedantry. Transaction costs differ by more than an order of magnitude
+    across this range -- our own measured median round trip is 93bps on the
+    microcap end against roughly 5bps at the top, and published implementation
+    shortfall runs 110.8bps for US small caps against 31.7bps for large. A
+    result pooled across bands is a weighted average of two different
+    economies, and the weighting is an artefact of which names happened to have
+    tags rather than of anything decided.
+
+    The same argument as `_require_one_method` for order-flow classifiers: the
+    fix for heterogeneous inputs is to refuse them, not to average them.
+    """
+    present = {b for b in bands if b is not None}
+    if len(present) > 1:
+        raise FundamentalsError(
+            f"study mixes size bands {sorted(present)}. Costs differ by an "
+            "order of magnitude across these, so a pooled result is an average "
+            "of different economies weighted by tag availability. Filter to one "
+            "band before measuring."
+        )
 
 
 def margin_compressing(client: XbrlClient, cik: str | int, as_of: date,

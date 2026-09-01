@@ -147,9 +147,10 @@ at 140 observations and OperatingIncomeLoss at 168. The frames endpoint returns
 | **Non-preplanned insider selling** | planned | Form 4 `aff10b5One` = false. The sell-side mirror of the routine/opportunistic classifier. **Coverage constraint below.** |
 | Margin compression (gross + operating) | built | 4 consecutive quarters of decline; GrossProfit / OperatingIncomeLoss / Revenues |
 | Price/Sales + gross margin | built | `fundamentals.Snapshot` -- P/E is undefined for 74% of small caps |
-| **Price/FCF** | planned | computable for **64.7%** of small filers; cash is harder to dress up than net income. The one multiple worth adding — see the measurement below |
-| **EV/EBITDA** | blocked | best-evidenced multiple in the literature and computable for only **14.4%** of small filers. The missing 86% are not missing at random |
-| Forward P/E | blocked | needs analyst consensus. Microcaps are largely uncovered, point-in-time estimates are not free, and it inherits P/E's undefinedness anyway |
+| **Price/FCF** | built | `Snapshot.price_to_free_cash_flow` — best-covered cash multiple at every size band |
+| **EV/EBITDA** | built | `Snapshot.ev_to_ebitda` — best-evidenced multiple in the literature; a large-cap tool, 13.6% computable on microcaps |
+| **Trailing P/E** | built | `Snapshot.price_to_earnings` — usable only because the universe moved: 86% defined over $10B revenue vs 23% under $100M |
+| Forward P/E | blocked | needs point-in-time analyst consensus. **The one member of the five that no choice of universe unlocks** — a vendor problem, not a coverage one |
 | PEG (textbook) | blocked | rejected on the same grounds, plus Damodaran's: dividing P/E by growth does not neutralise growth, ignores risk, and double-counts the first year |
 | YoY revenue growth | built | conditioner rather than a signal on its own |
 | Value/Growth score (P/S ÷ growth) | built | a sales-based PEG variant; low = most growth per dollar of valuation |
@@ -227,6 +228,57 @@ readability rather than fitted to anything.
 **Where it agrees with us, it agrees for the right reason:** its case for P/S is
 that it works on unprofitable companies with no earnings to divide by. That is
 exactly why `fundamentals.py` leads with P/S.
+
+### Decision: build the five, and scope them to large caps
+
+Directed 2026-09-01. The objection above was not that the multiples are bad — it
+was that they are calibrated on a population we were not trading. Moving the
+universe answers that, so P/E, P/FCF and EV/EBITDA are now built in
+`fundamentals.py` alongside P/S.
+
+**Re-measured across the whole size distribution before building**, because the
+microcap number alone does not say whether moving up fixes anything:
+
+| band | n | P/E defined | FCF | EBITDA | EV/EBITDA |
+| --- | --- | --- | --- | --- | --- |
+| revenue < $100M | 1,991 | 23.4% | 61.9% | 38.2% | 13.6% |
+| $100M – $1B | 1,217 | 49.1% | 73.8% | 56.2% | 33.4% |
+| $1B – $10B | 1,217 | 73.3% | 69.2% | 62.5% | **48.0%** |
+| over $10B | 427 | **85.7%** | 65.8% | 52.9% | 41.9% |
+
+Two results that changed the plan:
+
+**Size fixes P/E and does not fix EV/EBITDA.** P/E definedness goes 23% → 86%,
+which is the whole case for moving universe. EV/EBITDA only reaches 42%, so the
+best-evidenced multiple in the literature is still a minority even among the
+largest filers — the top band is thick with banks and insurers for whom
+operating income and capex do not mean what the formula assumes.
+
+**"Bigger is better" is false past mid-cap.** FCF, EBITDA and EV/EBITDA all peak
+in the **$1B–$10B** band and decline above it. If one band is to be picked for
+the valuation track, the data says mid-cap, not mega-cap.
+
+**Forward P/E stays blocked, and this is the correction to the instruction.** It
+is the one member of the five that no choice of universe unlocks. Large caps
+have abundant analyst coverage; we have no *point-in-time record of what that
+coverage said*, and using today's estimates to judge a past date is the same
+back-door lookahead that rules out Yahoo for reported figures. That is a vendor
+problem, not a coverage problem, and market cap does not touch it.
+
+**What is still missing is the question's shape, not the ratios.** Everything
+else in this backlog is an event study — something happened on a date, measure
+what followed. A valuation multiple is cross-sectional: rank the universe, hold
+the cheapest slice, rebalance. The engine can express that, but only once a
+**rebalance-date population** exists: one row per (symbol, month-end) carrying
+that date's multiples and the symbol's quintile within its band. That single
+piece blocks all four large-cap candidates, and it is the same piece for each.
+
+`size_band` and `guard_single_band` exist so the two universes cannot be pooled
+by accident. Costs differ by more than an order of magnitude across them — our
+measured 93bps median on microcaps against roughly 5bps at the top, and
+published implementation shortfall of 110.8bps for US small caps against 31.7bps
+for large — so a pooled result is an average of two economies, weighted by
+whichever filers happened to have tags.
 
 ### The 10b5-1 coverage constraint
 
