@@ -45,6 +45,86 @@ ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})")
 
 MAX_REQUESTS_PER_SECOND = 8  # below the SEC's 10/s ceiling, with headroom
 
+#: `issuerTradingSymbol` is free text and filers treat it as such. Measured over
+#: 4,740 distinct symbols in the store, 50 (1.1%) were unusable as written and
+#: carried 1,268 events (0.69%). They failed the price backfill with a 400 from
+#: the vendor and were parked as "failures", which read as absent data when it
+#: was actually absent parsing.
+#:
+#: The loss is small but not random: the dual-class spellings below are all
+#: established mid and large caps -- SIRI, LEN, HEI, GEF, PARA, NYCB -- because
+#: a company with two share classes has two symbols to write in one field. So
+#: the malformed set skews toward exactly the larger, more liquid names, which
+#: is the opposite of the bias we can afford in a microcap study.
+#:
+#: Observed families:
+#:     NASDAQ:DHC  NYSE: KRC  NTIP-NYSE  NYSE/TRN   exchange prefix or suffix
+#:     (SIRI)  (CALX)  "'LTRX"  CHEA]  QSAM)        wrapped in punctuation
+#:     GEF, GEF-B   LEN, LEN.B   MOGA/MOGB          two classes in one field
+#:     -   --   N/A   1314152   N O G               junk
+_EXCHANGE_PREFIX = re.compile(
+    r"^\s*(?:NYSE|NASDAQ|NASD|AMEX|NYSEAMERICAN|NYSE\s*MKT|OTC|CBOE|ASX|TSX)"
+    r"\s*[:\-/]\s*", re.I)
+_EXCHANGE_SUFFIX = re.compile(
+    r"\s*[\-/]\s*(?:NYSE|NASDAQ|NASD|AMEX|OTC)\s*$", re.I)
+#: Where a filer wrote two classes, the first is the one the filing is about
+#: often enough to be the only defensible choice, and picking arbitrarily is
+#: better than dropping the issuer entirely.
+_SPLIT_ON = re.compile(r"[,;/]|\s+AND\s+|\s{2,}", re.I)
+#: Class suffixes on US listings are one or two characters -- .A .B .U .W .WS
+#: .PR .RT and so on. Allowing more was too loose: "AB-LEND" and "M-6697" both
+#: pass a 4-character rule while being nothing of the kind, and a wrong ticker
+#: attaches an insider's trade to another company's price series. Checked
+#: against the store: exactly two symbols carry a longer suffix, both junk, and
+#: neither has price data.
+_VALID_SYMBOL = re.compile(r"^[A-Z][A-Z0-9]{0,6}(?:[.\-][A-Z0-9]{1,2})?$")
+#: Placeholders filers use for "none". Checked after normalisation so that a
+#: real ticker is never caught by them.
+_PLACEHOLDERS = {"NA", "N/A", "NONE", "-", "--", "---", "N.A.", "TBD", ""}
+
+
+def normalise_symbol(raw: str | None) -> str:
+    """Extract a usable ticker from the free-text issuer symbol field.
+
+    Returns "" when nothing usable is present, which callers already treat as
+    "skip this filing". Deliberately conservative: a wrong ticker attaches an
+    insider's trade to another company's price series, which is far worse than
+    dropping the filing, so anything that does not end up looking like a ticker
+    is discarded rather than guessed at.
+    """
+    if not raw:
+        return ""
+    text = raw.strip().upper()
+    if text in _PLACEHOLDERS:
+        return ""
+
+    # Punctuation wrappers first: "(NYSE:FBC)" has to lose its brackets before
+    # the exchange prefix is visible.
+    text = text.strip("\"'()[]{}<> \t")
+    text = _EXCHANGE_PREFIX.sub("", text)
+    text = _EXCHANGE_SUFFIX.sub("", text)
+    text = text.strip("\"'()[]{}<> \t")
+
+    # Two classes in one field: take the first and let the rest go. Splitting
+    # into two events would double-count one filing.
+    first = _SPLIT_ON.split(text)[0].strip()
+    first = first.strip("\"'()[]{}<> \t")
+    # A trailing bare space-separated class ("GEF B", "SNV PR E") -- keep the
+    # root, which is the tradeable line.
+    if " " in first:
+        head = first.split()[0]
+        # "N O G" is a spaced-out ticker, not a root plus a class. Rejoining
+        # single letters recovers it; anything else keeps the head.
+        parts = first.split()
+        if all(len(p) == 1 for p in parts) and 2 <= len(parts) <= 6:
+            first = "".join(parts)
+        else:
+            first = head
+
+    if first in _PLACEHOLDERS or not _VALID_SYMBOL.match(first):
+        return ""
+    return first
+
 #: Open-market purchase. The only transaction code with consistent academic
 #: support as an informative signal -- grants (A), option exercises (M) and
 #: tax withholding (F) are compensation mechanics, not conviction.
@@ -295,7 +375,7 @@ def parse_form4(raw: str) -> list[InsiderTransaction]:
     except ET.ParseError:
         return []
 
-    symbol = (_text(doc.find("issuer/issuerTradingSymbol")) or "").upper()
+    symbol = normalise_symbol(_text(doc.find("issuer/issuerTradingSymbol")))
     issuer_cik = _text(doc.find("issuer/issuerCik")) or ""
     if not symbol:
         return []

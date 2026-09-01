@@ -939,6 +939,62 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def cmd_repair_symbols(args: argparse.Namespace) -> int:
+    """Re-normalise issuer tickers already in the event store.
+
+    `normalise_symbol` runs at ingest, but the store holds millions of events
+    written before it existed, and re-ingesting them costs hours. This rewrites
+    the symbol column in place instead.
+
+    Safe to re-run: normalisation is idempotent, and `external_id` is untouched
+    so nothing about event identity or the point-in-time guarantee changes.
+    Symbols that normalise to nothing are left exactly as they are -- they are
+    already excluded from the queue by the same validity check, and blanking
+    them would destroy the only record of what the filer actually wrote.
+    """
+    from .research.edgar import normalise_symbol
+    from .research.eventstore import EventStore
+
+    store = EventStore(DEFAULT_STATE / EVENTS_DB)
+    conn = store._conn
+    rows = list(conn.execute(
+        "SELECT DISTINCT symbol FROM events WHERE symbol IS NOT NULL"))
+
+    repairs: list[tuple[str, str]] = []
+    unusable: list[str] = []
+    for (raw,) in rows:
+        fixed = normalise_symbol(raw)
+        if not fixed:
+            if raw:
+                unusable.append(raw)
+        elif fixed != raw:
+            repairs.append((raw, fixed))
+
+    print(f"{len(rows):,} distinct symbols")
+    print(f"  {len(repairs):,} need repair")
+    print(f"  {len(unusable):,} are unusable and stay as filed")
+
+    moved = 0
+    for raw, fixed in repairs:
+        n = conn.execute("SELECT COUNT(*) FROM events WHERE symbol = ?",
+                         (raw,)).fetchone()[0]
+        moved += n
+        if args.dry_run:
+            print(f"    {raw!r:<24} -> {fixed:<10} {n:>6,} events")
+            continue
+        conn.execute("UPDATE events SET symbol = ? WHERE symbol = ?",
+                     (fixed, raw))
+    if not args.dry_run:
+        conn.commit()
+
+    verb = "would move" if args.dry_run else "moved"
+    print(f"\n{verb} {moved:,} events onto a usable ticker")
+    if unusable and args.dry_run:
+        print(f"\nunusable (left alone): {', '.join(repr(u) for u in unusable[:20])}")
+    store.close()
+    return 0
+
+
 def cmd_ingest_fundamentals(args: argparse.Namespace) -> int:
     """Cache XBRL company facts for every issuer we hold events on.
 
@@ -1405,6 +1461,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "default -- this is for diagnosing the sweep, not for "
                          "producing a finding")
     ms.set_defaults(func=cmd_measure, features=True, costs=True, joins=True)
+
+    rep = sub.add_parser("repair-symbols",
+                         help="re-normalise issuer tickers already stored")
+    rep.add_argument("--dry-run", action="store_true",
+                     help="report what would change without writing")
+    rep.set_defaults(func=cmd_repair_symbols)
 
     fnd = sub.add_parser("ingest-fundamentals",
                          help="cache SEC XBRL company facts for held issuers")

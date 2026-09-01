@@ -173,6 +173,15 @@ jobs:
       - name: Snapshot Reddit sentiment
         run: python -m tradezbotz ingest-sentiment
 
+      # Issuer tickers arrive as free text and filers treat them as such:
+      # "NYSE: KRC", "(SIRI)", "GEF,GEF.B", "N O G". Measured over 4,740
+      # distinct symbols, 50 were unusable as written and failed the price
+      # backfill with a vendor 400 that got parked as a "failure" -- absent
+      # parsing reading as absent data. Normalisation runs at ingest now; this
+      # repairs what was stored before it existed. Idempotent and cheap.
+      - name: Repair issuer tickers
+        run: python -m tradezbotz repair-symbols
+
       # No vendor credentials: this reads the event store and writes the queue.
       # It briefly required them by accident after the switch to Alpaca, and
       # failed the whole run.
