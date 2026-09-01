@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Sequence
 
-from .intraday import PROFILE_BUCKETS, MinuteBar, SessionProfile
+from .intraday import PROFILE_BUCKETS, IntradayError, MinuteBar, SessionProfile
 
 #: Fraction of volume defining the value area. 70% is the Market Profile
 #: convention, chosen originally as roughly one standard deviation.
@@ -83,8 +83,17 @@ def build_profile(symbol: str, day: date, bars: Sequence[MinuteBar],
     minute that opened at 10 and closed at 11 traded across that range, and
     putting all of it at 11 shifts the point of control toward wherever minutes
     happened to end.
+
+    **Bars are sorted before anything sequential is read off them.** Everything
+    this used to compute -- min, max, sum, a histogram -- is order-free, so an
+    out-of-order input produced a correct profile and nobody would have noticed.
+    The session-sequence fields are not order-free: on unsorted input they would
+    report the wrong minute for the extreme and a plausible-looking volume share
+    beside it. Sorting on the datetime rather than its string form is deliberate
+    too, since Alpaca omits the fractional part when it is zero and `...:58Z`
+    sorts after `...:58.267Z` lexicographically.
     """
-    bars = [b for b in bars if b.volume > 0]
+    bars = sorted((b for b in bars if b.volume > 0), key=lambda b: b.ts)
     if not bars:
         return None
 
@@ -104,10 +113,26 @@ def build_profile(symbol: str, day: date, bars: Sequence[MinuteBar],
         hist[idx] += b.volume
 
     delta, unsigned = tick_rule_delta(bars)
+
+    # Earliest bar wins a tie, which is the conservative reading: a level
+    # touched twice was first reached at the first touch, and dating it to the
+    # later one would overstate how little session was left to reclaim in.
+    # min/max return the first extreme they meet, so that falls out for free.
+    low_idx = min(range(len(bars)), key=lambda i: bars[i].low)
+    high_idx = max(range(len(bars)), key=lambda i: bars[i].high)
+    start = bars[0].ts
+
+    def offset(i: int) -> int:
+        return int((bars[i].ts - start).total_seconds() // 60)
+
     return SessionProfile(
         symbol=symbol.upper(), day=day, low=low, high=high, volume=total,
         vwap=vwap, histogram=tuple(hist), delta=delta, unsigned_volume=unsigned,
         minute_count=len(bars), rth_only=rth_only,
+        session_open=bars[0].open, session_close=bars[-1].close,
+        low_minute=offset(low_idx), high_minute=offset(high_idx),
+        volume_after_low=sum(b.volume for b in bars[low_idx + 1:]),
+        volume_after_high=sum(b.volume for b in bars[high_idx + 1:]),
     )
 
 
@@ -465,3 +490,93 @@ def delta_divergence(profiles: Sequence[SessionProfile]) -> bool:
     cd = cumulative_delta(profiles)
     delta_higher = min(cd[mid:]) > min(cd[:mid])
     return price_lower and delta_higher
+
+
+# --- intraday liquidity sweep -------------------------------------------------
+#
+# The daily-bar `indicators.swept_low` knows the session pierced a prior level
+# and closed back above it. It cannot know whether the reclaim took ten minutes
+# or happened on the closing print, and those are opposite events: the first is
+# the stop run the pattern describes, the second is a breakdown that ticked up
+# at the bell. So the daily version is an upper bound on the population, and
+# this is the version that actually tests the claim.
+#
+# **The evidence does not obviously favour it, and that is recorded here rather
+# than discovered later.** Osler (JIMF 2005) found that stop-loss clusters
+# PROPAGATE trends -- it is take-profit clusters that reverse -- and that the
+# effect is significant for hours but not days. Short-term reversal after
+# extreme moves is real and is strongest in small illiquid names, but Avramov/
+# Chordia/Goyal (2006) and de Groot/Huij/Zhou (2011) both find trading costs
+# consume it in exactly that segment. Our universe is that segment, at a 93bps
+# measured median round trip.
+#
+# None of which is a reason not to measure it. It is a reason not to expect it.
+
+#: Minimum share of session volume that must trade AFTER the extreme printed.
+#:
+#: This is the whole point of the timing fields. A "reclaim" carrying 2% of the
+#: session's volume is a closing artefact; the pattern being described has price
+#: taking the level early and spending real volume above it afterwards. 10% is
+#: about the last 40 minutes of a normal session by volume, given the U-shaped
+#: intraday curve puts a heavy share into the close -- deliberately permissive,
+#: since the job here is to exclude the artefact, not to hand-fit a threshold.
+MIN_SHARE_AFTER_SWEEP = 0.10
+
+
+class TimingUnavailable(IntradayError):
+    pass
+
+
+def require_timing(profiles: Sequence[SessionProfile]) -> None:
+    """Refuse a mixed store rather than average across it.
+
+    Sessions reduced before the sequence fields existed carry None, and raw
+    minute bars are not kept, so they cannot be repaired in place -- they have
+    to be refetched. Silently skipping them would quietly restrict a study to
+    whatever happened to be reduced after this change, with the sample
+    definition depending on deployment history rather than on anything about
+    the market. The same reasoning as `_require_one_method`.
+    """
+    missing = [p for p in profiles if not p.has_timing]
+    if missing:
+        raise TimingUnavailable(
+            f"{len(missing)} of {len(profiles)} sessions were reduced before "
+            "session-sequence fields existed (first: "
+            f"{missing[0].symbol} {missing[0].day}). Minute bars are not kept, "
+            "so these must be refetched -- `backfill-intraday --refresh-untimed` -- "
+            "not filled in."
+        )
+
+
+def swept_low_intraday(profile: SessionProfile, level: float, *,
+                       min_share_after: float = MIN_SHARE_AFTER_SWEEP) -> bool:
+    """Bullish sweep: took out `level`, then reclaimed it with session to spare.
+
+    `level` comes from the daily lookback -- the prior 20-session low, matching
+    `indicators.swept_low` -- and is not knowable at reduction time, which is
+    why the stored fields are volume shares rather than a reclaim timestamp.
+
+    Deliberately says nothing about conviction volume. The daily version gates
+    on `relative_volume` across sessions, which one profile cannot see; pair
+    this with that rather than reinventing it here at a different threshold.
+    """
+    require_timing([profile])
+    if not (profile.low < level <= profile.session_close):
+        return False
+    share = profile.share_after_low
+    return share is not None and share >= min_share_after
+
+
+def swept_high_intraday(profile: SessionProfile, level: float, *,
+                        min_share_after: float = MIN_SHARE_AFTER_SWEEP) -> bool:
+    """Bearish sweep: pierced `level` and fell back below it, with session left.
+
+    The exact partition-complement of an intraday breakout above the same level,
+    and its value is mostly that: it stops a breakout result being read as a
+    breakout result when it is a sweep result.
+    """
+    require_timing([profile])
+    if not (profile.high > level >= profile.session_close):
+        return False
+    share = profile.share_after_high
+    return share is not None and share >= min_share_after

@@ -533,6 +533,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         from .research.intraday import ProfileStore
         store = ProfileStore(profiles_path)
         print(f"intraday sessions: {store.count():,} over {len(store.symbols())} symbols")
+        untimed = store.count_untimed()
+        if untimed:
+            print(f"  without timing   : {untimed:,} -- these predate the "
+                  f"session-sequence fields and block the intraday sweep test.\n"
+                  f"  Refetch with `backfill-intraday --refresh-untimed`; they "
+                  f"cannot be repaired in place.")
         store.close()
     else:
         print("intraday sessions: none")
@@ -626,8 +632,19 @@ def cmd_backfill_intraday(args: argparse.Namespace) -> int:
             for symbol, bars in bars_by_symbol.items():
                 for day, session in group_by_session(bars).items():
                     if store.was_fetched(symbol, day):
-                        skipped += 1
-                        continue
+                        # --refresh-untimed rebuilds only what is actually
+                        # missing the session-sequence fields. Those cannot be
+                        # filled in from the store -- minute bars are never kept
+                        # -- so the session has to come down again, and scoping
+                        # the refetch to the rows that need it is the difference
+                        # between minutes and a full re-reduction.
+                        stale = False
+                        if args.refresh_untimed:
+                            held = store.get(symbol, day)
+                            stale = held is not None and not held.has_timing
+                        if not stale:
+                            skipped += 1
+                            continue
                     profile = build_profile(symbol, day, session)
                     if profile is None:
                         # A real session with no prints. Recorded as attempted so
@@ -1153,6 +1170,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="classify flow from trades and quotes (Lee-Ready) "
                           "instead of minute closes; far slower and the only "
                           "version that actually measures order flow")
+    itd.add_argument("--refresh-untimed", action="store_true",
+                     help="refetch sessions stored before the session-sequence "
+                          "fields existed. They cannot be repaired in place -- "
+                          "minute bars are not kept -- and `status` reports how "
+                          "many are outstanding")
     itd.add_argument("--trade-pages", type=int, default=3,
                      help="cap trade pagination per session under --exact")
     itd.add_argument("--quote-pages", type=int, default=6,

@@ -62,12 +62,12 @@ control group matters more than the candidate.
 | Donchian breakout | built | `indicators.donchian_breakout` | prior range excludes current bar |
 | Trend filter (above 200MA) | built | `indicators.above_ma` | mostly a conditioner for other signals |
 | 12-1 momentum | built | `indicators.momentum` | skips recent month for short-term reversal |
-| **Liquidity sweep (bullish)** | built | `indicators.swept_low` | daily-bar approximation — see caveat below |
-| **Liquidity sweep (bearish)** | built | `indicators.swept_high` | exact control for Donchian breakout |
+| **Liquidity sweep (bullish)** | built | `indicators.swept_low` (daily), `microstructure.swept_low_intraday` | evidence points the other way — see caveat below |
+| **Liquidity sweep (bearish)** | built | `indicators.swept_high` (daily), `microstructure.swept_high_intraday` | exact control for Donchian breakout; that is its real job |
 | **Anchored VWAP** | built | `indicators.anchored_vwap` | anchors to real events, not arbitrary dates |
 | Relative volume | built | `indicators.relative_volume` | median-based; gates the sweeps |
-| **Volume profile (POC / value area)** | blocked | — | needs intraday pipeline, see below |
-| **Order flow (signed volume / delta)** | blocked | — | needs trade+quote pipeline, see below |
+| **Volume profile (POC / value area)** | blocked | `microstructure.above_poc` etc | pipeline built; blocker is now the join from profiles.db to labelled events |
+| **Order flow (signed volume / delta)** | blocked | `microstructure.lee_ready` | pipeline built; exact flow covers too few events to clear the 30-trade floor |
 | VWAP reversion (session) | planned | — | needs intraday |
 | Opening range breakout | planned | — | needs intraday |
 
@@ -336,3 +336,59 @@ traders actually describe is the intraday one, which is materially stricter.
 So a positive daily-bar result is an **upper bound on the population**, not a
 measurement of the pattern. Treat it as a reason to build the intraday test, not
 as confirmation of the idea.
+
+### The literature points the other way, and that is recorded in the prior
+
+Researched 2026-09-01, before any measurement:
+
+- **Osler (JIMF 2005, "Stop-loss orders and price cascades")** is the paper
+  everyone cites for this pattern, and it finds the opposite of what the pattern
+  claims. Stop-loss clusters *propagate trends*; it is take-profit clusters that
+  reverse. The retail narrative attached itself to that evidence with the sign
+  flipped.
+- The same paper: results are **"statistically significant for hours, although
+  not for days"**. Our daily horizons are 1, 5 and 20 sessions — the documented
+  effect has decayed before the shortest one closes.
+- Short-term reversal after extreme moves is real, and **strongest in small
+  illiquid stocks**. Avramov/Chordia/Goyal (2006) and de Groot/Huij/Zhou (2011)
+  both find trading costs consume it in exactly that segment; what makes it
+  survive is restricting to large caps, which we cannot do — the insider signal
+  lives in microcaps, at our measured 93bps median round trip.
+- **Bulkowski's busted-pattern data is the one genuinely supportive source**:
+  downward breakouts bust at a 40% median rate against 24% for upward, and
+  single-busted patterns move 23% (up) / 53% (down) against 42% / 15% for
+  non-busted ones.
+- SMC/ICT community backtests reporting 50–65% win rates are not usable
+  evidence. The rule sets have subjective components — displacement, inducement,
+  "major" POI — so two researchers get different signals from the same data, and
+  no knowable trial count means no Deflated Sharpe. The same structural problem
+  as GainzAlgo.
+
+**The conclusion is not to drop it.** `swept_high` is the exact partition
+complement of `donchian_breakout` — a bar piercing the prior high either holds it
+or does not — so running both is what stops a breakout result being read as a
+breakout result when it is a sweep result. That value holds regardless of whether
+the sweep works. Both priors now say "expected to fail" rather than staying
+hopeful.
+
+### The intraday version, and why the fields had to be added first
+
+`swept_low_intraday` / `swept_high_intraday` in `research/microstructure.py`
+test the actual claim: they require the reclaim to leave real session behind it
+(≥10% of session volume after the extreme printed), which is what separates a
+stop run from a breakdown that ticked up at 15:58. The daily bar reports those
+two identically.
+
+That needed six fields `SessionProfile` did not have — `session_open`,
+`session_close`, `low_minute`, `high_minute`, `volume_after_low`,
+`volume_after_high`. Everything the reduction stored before them was order-free
+(min, max, sum, a histogram), which is what makes the store small and is also
+exactly why this class of pattern was untestable.
+
+**They had to be added before the intraday backfill ran at scale.** Raw minute
+bars are never kept, so a field missing at reduction time is only recoverable by
+refetching the session. `profiles.db` was empty when this landed, so the cost was
+zero; `status` reports any untimed sessions as an outstanding refetch bill, and
+`backfill-intraday --refresh-untimed` pays it. `require_timing` refuses a mixed
+store rather than silently skipping old rows — skipping would make the sample
+definition a fact about deployment history rather than about the market.

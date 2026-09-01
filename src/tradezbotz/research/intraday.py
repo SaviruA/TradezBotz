@@ -65,6 +65,19 @@ RTH_OPEN, RTH_CLOSE = dtime(9, 30), dtime(16, 0)
 #: stored session near 200 bytes.
 PROFILE_BUCKETS = 40
 
+#: Columns added to `session_profiles` after the table first shipped. An
+#: existing database is migrated by adding whichever of these it lacks; a fresh
+#: one gets them from PROFILE_SCHEMA. Kept as one list so the two paths cannot
+#: drift apart and produce stores with different shapes.
+PROFILE_TIMING_COLUMNS = (
+    ("session_open", "REAL"),
+    ("session_close", "REAL"),
+    ("low_minute", "INTEGER"),
+    ("high_minute", "INTEGER"),
+    ("volume_after_low", "REAL"),
+    ("volume_after_high", "REAL"),
+)
+
 
 class IntradayError(PriceError):
     pass
@@ -280,6 +293,67 @@ class SessionProfile:
     #: the field exists to make a mixed store detectable rather than silent.
     flow_method: str = "tick_minute"
 
+    # --- sequence within the session ----------------------------------------
+    #
+    # Everything above is order-free: min, max, sum, a histogram. That is what
+    # makes the store small, and it is also what made a whole class of pattern
+    # untestable, because the distinguishing content of those patterns IS the
+    # order of events.
+    #
+    # A liquidity sweep is the clearest case. "The low pierced a prior level and
+    # the close came back above it" describes both a stop run that reversed in
+    # the first ten minutes and a genuine breakdown that happened to tick up at
+    # 15:58. Those are opposite events and the fields above cannot tell them
+    # apart. The daily bar cannot either, which is why the daily-bar version is
+    # an upper bound on the population rather than a measurement of the pattern.
+    #
+    # Six numbers fix it, against a 40-float histogram -- the cost is noise. The
+    # reason they had to be added *before* the backfill ran rather than when the
+    # sweep test was written is that raw minute bars are never kept, so a field
+    # missing at reduction time can only be recovered by refetching the session.
+    #
+    # All default to None so a session reduced before this change is detectable
+    # rather than silently reading as "the low printed at minute zero".
+
+    #: First bar's open and last bar's close. Not derivable from low/high, and
+    #: without them the close's position in the session range is unknown.
+    session_open: float | None = None
+    session_close: float | None = None
+    #: Minutes from the session's first bar to the bar carrying the extreme.
+    #: Earliest bar wins on a tie.
+    low_minute: int | None = None
+    high_minute: int | None = None
+    #: Volume that traded strictly after the extreme printed. This is the
+    #: level-agnostic form of "how much session was left to reclaim in", and it
+    #: is the reason these are volume shares rather than a reclaim timestamp: a
+    #: reclaim is defined against a price level that is not known at reduction
+    #: time, since it comes from the daily lookback.
+    volume_after_low: float | None = None
+    volume_after_high: float | None = None
+
+    @property
+    def has_timing(self) -> bool:
+        """Whether this session carries the sequence fields.
+
+        False for anything reduced before they existed. Check it rather than
+        reading the fields, because a `None` handled as zero puts every old
+        session's low at the opening bell.
+        """
+        return self.session_close is not None and self.low_minute is not None
+
+    @property
+    def share_after_low(self) -> float | None:
+        """Fraction of session volume that traded after the low printed."""
+        if self.volume_after_low is None or self.volume <= 0:
+            return None
+        return self.volume_after_low / self.volume
+
+    @property
+    def share_after_high(self) -> float | None:
+        if self.volume_after_high is None or self.volume <= 0:
+            return None
+        return self.volume_after_high / self.volume
+
     @property
     def bucket_width(self) -> float:
         if self.high <= self.low or not self.histogram:
@@ -305,6 +379,14 @@ CREATE TABLE IF NOT EXISTS session_profiles (
     minute_count     INTEGER NOT NULL,
     rth_only         INTEGER NOT NULL,
     flow_method      TEXT NOT NULL DEFAULT 'tick_minute',
+    -- Nullable on purpose: NULL means "reduced before these existed", which is
+    -- a different thing from zero and has to stay distinguishable.
+    session_open     REAL,
+    session_close    REAL,
+    low_minute       INTEGER,
+    high_minute      INTEGER,
+    volume_after_low REAL,
+    volume_after_high REAL,
     PRIMARY KEY (symbol, day)
 );
 CREATE TABLE IF NOT EXISTS profile_fetches (
@@ -338,18 +420,50 @@ class ProfileStore:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(PROFILE_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add the session-sequence columns to a store that predates them.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a
+        database written before those columns existed would silently keep the
+        old shape and every insert naming them would fail. Adding them here is
+        cheap: SQLite's ADD COLUMN does not rewrite rows, and existing sessions
+        get NULL, which is exactly the "not recorded" they deserve.
+        """
+        have = {
+            r["name"] for r in
+            self._conn.execute("PRAGMA table_info(session_profiles)")
+        }
+        for name, kind in PROFILE_TIMING_COLUMNS:
+            if name not in have:
+                self._conn.execute(
+                    f"ALTER TABLE session_profiles ADD COLUMN {name} {kind}"
+                )
 
     def close(self) -> None:
         self._conn.close()
 
     def put(self, profile: SessionProfile) -> None:
+        # Columns named explicitly. The positional form here broke the moment a
+        # column was added: ADD COLUMN appends at the end, so a bare VALUES list
+        # either fails on arity or -- worse, had the counts happened to match --
+        # writes each value into the wrong column.
         self._conn.execute(
-            "INSERT OR REPLACE INTO session_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO session_profiles ("
+            "symbol, day, low, high, volume, vwap, histogram, delta, "
+            "unsigned_volume, minute_count, rth_only, flow_method, "
+            "session_open, session_close, low_minute, high_minute, "
+            "volume_after_low, volume_after_high"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (profile.symbol, profile.day.isoformat(), profile.low, profile.high,
              profile.volume, profile.vwap, _pack(profile.histogram), profile.delta,
              profile.unsigned_volume, profile.minute_count, int(profile.rth_only),
-             profile.flow_method),
+             profile.flow_method,
+             profile.session_open, profile.session_close,
+             profile.low_minute, profile.high_minute,
+             profile.volume_after_low, profile.volume_after_high),
         )
         self.mark_fetched(profile.symbol, profile.day)
         self._conn.commit()
@@ -390,6 +504,17 @@ class ProfileStore:
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM session_profiles").fetchone()[0]
 
+    def count_untimed(self) -> int:
+        """Sessions reduced before the sequence fields existed.
+
+        Reported by `status` because these are not repairable in place -- minute
+        bars are not kept -- so the number is a refetch bill, and a bill that is
+        invisible is one nobody pays until a study silently runs on half a store.
+        """
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM session_profiles WHERE low_minute IS NULL"
+        ).fetchone()[0]
+
     @staticmethod
     def _row(r: sqlite3.Row) -> SessionProfile:
         return SessionProfile(
@@ -398,6 +523,10 @@ class ProfileStore:
             histogram=_unpack(r["histogram"]), delta=r["delta"],
             unsigned_volume=r["unsigned_volume"], minute_count=r["minute_count"],
             rth_only=bool(r["rth_only"]), flow_method=r["flow_method"],
+            session_open=r["session_open"], session_close=r["session_close"],
+            low_minute=r["low_minute"], high_minute=r["high_minute"],
+            volume_after_low=r["volume_after_low"],
+            volume_after_high=r["volume_after_high"],
         )
 
 

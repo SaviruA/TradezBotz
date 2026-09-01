@@ -145,11 +145,20 @@ FEATURE_HYPOTHESES: tuple[tuple[str, str, str], ...] = (
     ("swept_low",
      "Took out the prior 20-session low on conviction volume, then closed back "
      "inside. The failed breakdown.",
-     "the daily-bar version is a loose upper bound on the real pattern; a "
-     "positive result argues for building the intraday test, not for trading it"),
+     "expected to fail, and the direction may be backwards. Osler (JIMF 2005) "
+     "found stop-loss clusters PROPAGATE trends rather than reverse them -- it "
+     "is take-profit clusters that reverse -- and that the effect is "
+     "significant for hours, not days. Short-term reversal is real and is "
+     "strongest in exactly our microcaps, but Avramov/Chordia/Goyal and de "
+     "Groot/Huij/Zhou both find costs eat it there specifically. Kept as a "
+     "control, not as a hope"),
     ("swept_high",
-     "The bull-trap inverse, and the direct control for donchian_breakout.",
-     "negative for a long strategy -- which is the point of including it"),
+     "The bull-trap inverse, and the direct control for donchian_breakout: a "
+     "bar piercing the prior high either holds it or does not, so the two "
+     "partition the same events.",
+     "negative for a long strategy -- which is the point of including it. Its "
+     "real job is to stop a breakout result being read as a breakout result "
+     "when it is a sweep result"),
     ("above_ma_200",
      "Close above the 200-day average. A regime filter, not an entry.",
      "raises the mean of whatever it is paired with, and does nothing alone"),
@@ -196,6 +205,22 @@ def blocked_candidates() -> list[Candidate]:
             blocked_by="intraday profiles exist in profiles.db but are not "
                        "joined to labelled events; needs a FeatureBuilder "
                        "equivalent reading ProfileStore",
+        ),
+        Candidate(
+            "intraday liquidity sweep", everything,
+            "The pattern traders actually describe: price takes out a prior "
+            "level, the reclaim happens quickly, and the sequence within the "
+            "session is what distinguishes a stop run from a genuine breakdown "
+            "that merely closed off its low.",
+            prior="expected to fail for the same reasons as the daily version, "
+                  "and worth measuring anyway because it is the only form of "
+                  "the claim that is actually the claim: Osler's hours-not-days "
+                  "horizon is the one this operates on",
+            blocked_by="the detector and its stored inputs now exist "
+                       "(microstructure.swept_low_intraday), but profiles.db is "
+                       "not joined to labelled events -- the same missing join "
+                       "as volume profile, needing a FeatureBuilder equivalent "
+                       "that reads ProfileStore and the prior daily level",
         ),
         Candidate(
             "order flow imbalance", everything,
