@@ -122,8 +122,11 @@ jobs:
       # labellable event, or that whole early window returns UNKNOWN and the
       # filter carrying the edge never fires on it.
       #
-      # ~53 quarters. Uncached ones cost roughly nine minutes each, so the next
-      # two or three runs do the work and every run after that takes seconds.
+      # ~53 quarters. Measured on 2026-08-31: an uncached quarter costs about
+      # 1.7 minutes, not the nine originally assumed -- 11 quarters went by in
+      # 18 minutes. That run reached 2018Q4 before its budget expired, leaving
+      # roughly 22 quarters, so ~36 minutes finishes the window and every run
+      # after that takes seconds.
       - name: Ingest SEC bulk archives (baselines + labelling window)
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
