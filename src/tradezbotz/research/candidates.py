@@ -324,51 +324,6 @@ def blocked_candidates() -> list[Candidate]:
                        "consecutive quarters, and the store does not yet hold "
                        "enough of them",
         ),
-        # --- the large-cap valuation track -----------------------------------
-        #
-        # A deliberate second universe, and the first thing here that is not a
-        # microcap insider hypothesis. The five standard multiples are built and
-        # tested in `fundamentals.py`; what blocks them is not the ratios and
-        # not the data, it is the SHAPE of the question.
-        #
-        # Everything else in this file is an event study: something happened on
-        # a date, measure what followed. A valuation multiple is cross-sectional
-        # -- rank the universe, hold the cheapest slice, rebalance -- and there
-        # is no event to hang it on. The engine can express it, but only once a
-        # rebalance-date population exists: one row per (symbol, month-end)
-        # carrying that date's multiples and the symbol's quintile within the
-        # universe. That is the missing piece, and it is the same piece for all
-        # four.
-        Candidate(
-            "large cap: EV/EBITDA cheapest quintile", everything,
-            "The enterprise multiple. Loughran & Wellman (JFQA 2011) build a "
-            "factor from it earning 5.28%/yr; Gray & Vogel (JPM 2012) race it "
-            "against P/E, book-to-market and FCF/TEV over forty years and it "
-            "wins.",
-            prior="the best-evidenced multiple we have found, and the most "
-                  "arbitraged segment to run it in -- those two cancel to an "
-                  "unknown, which is the honest answer",
-            blocked_by="no rebalance-date event population; needs one row per "
-                       "(symbol, month-end) with multiples and universe rank",
-        ),
-        Candidate(
-            "large cap: P/FCF cheapest quintile", everything,
-            "Cash is materially harder to manage than net income, and "
-            "operating cash flow is the best-tagged number in XBRL at every "
-            "size band.",
-            prior="weaker than EV/EBITDA on the Gray & Vogel evidence, better "
-                  "covered in the data. Worth measuring for the coverage alone",
-            blocked_by="no rebalance-date event population",
-        ),
-        Candidate(
-            "large cap: trailing P/E cheapest quintile", everything,
-            "The textbook multiple, usable here only because the universe "
-            "moved: P/E is defined for 86% of filers over $10B of revenue "
-            "against 23% under $100M.",
-            prior="no edge. This is the single most-screened number in "
-                  "existence, on the most-analysed segment of the market",
-            blocked_by="no rebalance-date event population",
-        ),
         Candidate(
             "large cap: forward P/E", everything,
             "The one member of the standard five that no choice of universe "
@@ -401,3 +356,62 @@ def all_candidates(*, with_features: bool = True,
         out += join_candidates()
     out += blocked_candidates()
     return out
+
+#: The cross-sectional valuation track. These run against the population from
+#: `rebalance.py` -- one row per (symbol, month-end) with that date's multiples
+#: and the symbol's quantile -- NOT against the insider event population.
+#:
+#: They are kept in their own function for that reason. Sweeping them beside the
+#: insider candidates would pool two universes whose transaction costs differ by
+#: an order of magnitude, and `fundamentals.guard_single_band` exists to refuse
+#: exactly that.
+VALUE_HYPOTHESES: tuple[tuple[str, str, str], ...] = (
+    ("cheapest_ev_to_ebitda",
+     "Cheapest quintile on the enterprise multiple. Loughran & Wellman (JFQA "
+     "2011) build a factor from it earning 5.28%/yr; Gray & Vogel (JPM 2012) "
+     "race it against P/E, book-to-market and FCF/TEV over forty years and it "
+     "wins.",
+     "the best-evidenced multiple we have found, run on the most arbitraged "
+     "segment of the market. Those two cancel to an unknown, which is the "
+     "honest prior"),
+    ("cheapest_price_to_free_cash_flow",
+     "Cheapest quintile on price to free cash flow. Cash is harder to manage "
+     "than net income, and operating cash flow is the best-tagged number in "
+     "XBRL at every size band.",
+     "weaker than EV/EBITDA on the Gray & Vogel evidence, better covered in "
+     "the data"),
+    ("cheapest_price_to_earnings",
+     "Cheapest quintile on trailing P/E. Usable only because the universe "
+     "moved: defined for 86% of filers over $10B of revenue against 23% under "
+     "$100M.",
+     "no edge. The single most-screened number in existence, on the most "
+     "analysed segment of the market"),
+    ("cheapest_price_to_sales",
+     "Cheapest quintile on price to sales. The one multiple that works at "
+     "both ends of the size distribution, included here so the large-cap and "
+     "microcap tracks share a comparable measurement.",
+     "the bridge between the two universes; a disagreement between them on "
+     "this metric is more interesting than either result alone"),
+)
+
+
+def value_candidates() -> list[Candidate]:
+    """Cross-sectional hypotheses for the rebalance population.
+
+    Deliberately NOT included in `all_candidates`: they need a different event
+    population and a different universe, so mixing them into the insider sweep
+    would produce results pooled across two economies.
+    """
+    out = [Candidate(
+        "baseline: hold the whole universe", everything,
+        "Every symbol in the cohort at every rebalance. The cheapest quintile "
+        "has to beat this, not merely be positive -- in a rising market every "
+        "quintile is positive.",
+        prior="positive, and the number every value result must be read "
+              "against",
+        controlled=False,
+    )]
+    for key, rationale, prior in VALUE_HYPOTHESES:
+        out.append(Candidate(key, _true(key), rationale, prior=prior))
+    return out
+

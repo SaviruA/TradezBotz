@@ -66,7 +66,7 @@ control group matters more than the candidate.
 | **Liquidity sweep (bearish)** | built | `indicators.swept_high` (daily), `microstructure.swept_high_intraday` | exact control for Donchian breakout; that is its real job |
 | **Anchored VWAP** | built | `indicators.anchored_vwap` | anchors to real events, not arbitrary dates |
 | Relative volume | built | `indicators.relative_volume` | median-based; gates the sweeps |
-| **Volume profile (POC / value area)** | blocked | `microstructure.above_poc` etc | pipeline built; blocker is now the join from profiles.db to labelled events |
+| **Volume profile (POC / value area)** | built | `microstructure.above_poc`, `joins.ProfileJoin` | unblocked 2026-09-01 by the profile join |
 | **Order flow (signed volume / delta)** | blocked | `microstructure.lee_ready` | pipeline built; exact flow covers too few events to clear the 30-trade floor |
 | VWAP reversion (session) | planned | — | needs intraday |
 | Opening range breakout | planned | — | needs intraday |
@@ -279,6 +279,40 @@ measured 93bps median on microcaps against roughly 5bps at the top, and
 published implementation shortfall of 110.8bps for US small caps against 31.7bps
 for large — so a pooled result is an average of two economies, weighted by
 whichever filers happened to have tags.
+
+### Blockers: what was fixed and what genuinely cannot be
+
+Cleared 2026-09-01. Twelve candidates were blocked; five remain, and all five
+are outside our reach rather than merely unbuilt.
+
+**Fixed, all by the same missing piece.** A `Selector` sees `(payload, label)`
+and nothing else, so a data family with no path to the payload could not be
+tested however complete its own module was. `research/joins.py` gives three
+families that path — intraday profiles, holdings disclosures, XBRL facts — and
+`research/rebalance.py` synthesises the cross-sectional population the value
+candidates needed. Runnable candidates went 34 → 54, plus a separate 5-candidate
+value track.
+
+| was blocked on | fixed by |
+| --- | --- |
+| volume profile, intraday sweep | `ProfileJoin` reading `ProfileStore` |
+| congressional copy | `HoldingsJoin`, matched on the **filing** date |
+| P/S with growth | `FundamentalsJoin` + `FactsCache` + `ingest-fundamentals` |
+| large-cap EV/EBITDA, P/FCF, P/E | `rebalance.py` month-end cohorts with quantile ranks |
+
+**Still blocked, and honestly so:**
+
+| hypothesis | why it cannot be fixed here |
+| --- | --- |
+| Anchored VWAP from the filing | anchors on the event, so every value describes the **post-entry** path. Not an entry condition and cannot be made one without lookahead |
+| News sentiment | ApeWisdom serves no history at any price and news does not cover this universe. Accumulates forward only — not a build, a wait |
+| Forward P/E | needs point-in-time analyst consensus. A vendor problem; no choice of universe touches it |
+| Order flow imbalance | exact Lee-Ready flow is fetched per symbol per session; too few events carry it to clear the 30-trade floor. Accumulates |
+| 13F filer persistence **ranking** | `institution_added` is now measurable; *ranking* filers needs `holdings.persistence` across consecutive quarters and the store lacks them. Accumulates |
+
+Three of those five are waiting on data to accumulate, not on code. That is a
+real distinction and the report prints it, because "never tested" and "tested
+and failed" must never look the same.
 
 ### The 10b5-1 coverage constraint
 

@@ -20,7 +20,7 @@ on:
     inputs:
       ingest_minutes:
         description: "Minutes to spend pulling EDGAR filings"
-        default: "120"
+        default: "135"
       backfill_symbols:
         description: "Symbols to price-backfill this run"
         default: "4000"
@@ -47,9 +47,19 @@ jobs:
     # would have been cut. Filings and intraday trimmed to 25 and 30; both are
     # checkpointed and resume, so the cost is slower catch-up, not lost work.
     #
-    # The 150 for bulk archives is temporary pressure: it is only spent while
-    # the deeper 4895-day window loads its ~34 uncached quarters. Once cached,
-    # that step returns to seconds and the budget frees up again.
+    # Current arithmetic, after adding the fundamentals cache and measure:
+    #
+    #   bulk 135 + edgar 45 + filings 25 + holdings 20 + fundamentals 12
+    #   + intraday 15 + measure 10                        = 262 budgeted
+    #   + backfill ~49 + crosscheck ~10 + sentiment ~1     = ~322
+    #
+    # against 330. Nine minutes of slack, which is tight on purpose: the bulk
+    # archive step is the one paying for it, and it is temporary pressure --
+    # only spent while the deeper 4895-day window loads its uncached quarters.
+    # Once cached it returns to seconds and roughly two hours free up. It came
+    # down from 150 to 135 to fund the fundamentals cache; if a run starts
+    # getting cut at the tail, take it from there again rather than from a step
+    # that is not checkpointed.
     timeout-minutes: 330
 
     steps:
@@ -112,7 +122,7 @@ jobs:
             --timed \
             --days 4895 \
             --before "$(date -u -d '1 day' +%Y-%m-%d)" \
-            --max-minutes "${{ github.event.inputs.ingest_minutes || 150 }}"
+            --max-minutes "${{ github.event.inputs.ingest_minutes || 135 }}"
 
       # Bulk archives only exist through the last completed quarter, so the
       # current quarter still needs the per-filing path. Structural, not a bug.
@@ -195,6 +205,20 @@ jobs:
         run: |
           python -m tradezbotz backfill-intraday \
             --days 180 --minutes 15 --batch 50
+
+      # XBRL company facts, one request per issuer covering every concept and
+      # period they have ever reported. Measurement has to be offline -- the SEC
+      # allows 8 req/s -- so this fills the cache that `measure` reads.
+      #
+      # Shares the "ingest" lock with the EDGAR steps because it hits the same
+      # host under the same ceiling. Incremental: an issuer already cached is
+      # skipped, so steady state is seconds.
+      - name: Cache XBRL company facts
+        continue-on-error: true
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          python -m tradezbotz ingest-fundamentals --max-minutes 12
 
       - name: Status
         run: python -m tradezbotz status
