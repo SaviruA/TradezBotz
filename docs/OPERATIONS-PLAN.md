@@ -79,9 +79,17 @@ Monitor expected execution, not failures. Built as `runlog.py`.
 
 ---
 
-## Phase 0 — Set the bar, before any result exists
+## Phase 0 — Set the bar, before any result exists  ✅ DONE 2026-09-01
 
-Cost: an afternoon of decisions. Prerequisite: none. **Do this first.**
+Built as `research/deployment.py` with the thresholds committed in
+[`deployment-criteria.json`](deployment-criteria.json) and explained in
+[DEPLOYMENT-CRITERIA.md](DEPLOYMENT-CRITERIA.md). Set while `measure` had run
+once and every row reported thin coverage, so none of it could have been fitted
+to a result.
+
+**Status: UNCONFIRMED.** The gate refuses everything until the operator sets
+capital, drawdown halt and position ceiling. That is the intended state, not an
+omission.
 
 Write `docs/DEPLOYMENT-CRITERIA.md` and commit it as a machine-checked gate.
 Values below are proposals, not defaults to accept quietly.
@@ -249,7 +257,7 @@ not.
 
 | phase | prerequisite | start |
 | --- | --- | --- |
-| 0 — set the bar | none | **now, before any result is read** |
+| 0 — set the bar | none | **done, awaiting operator sign-off** |
 | 1 — surveillance | Phase 0 | now |
 | 2 — propose | one candidate past Phase 0 | not yet |
 | 3a — paper | Phase 2 | not yet |

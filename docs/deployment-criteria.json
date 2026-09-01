@@ -1,0 +1,14 @@
+{
+  "assumed_live_haircut": 0.5,
+  "capital_at_risk": 0.0,
+  "confirmed": false,
+  "max_control_ratio": 0.5,
+  "max_drawdown_halt": 0.0,
+  "max_fallback_share": 0.1,
+  "max_participation": 0.05,
+  "min_coverage": 0.4,
+  "min_deflated_sharpe": 0.95,
+  "min_trades": 200,
+  "require_holdout_confirmation": true,
+  "signed_off": "UNSIGNED -- operator values not yet chosen"
+}
