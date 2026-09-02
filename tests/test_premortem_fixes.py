@@ -232,7 +232,7 @@ class Bars:
                       requested_end=end)
 
 
-def label_at(day=date(2023, 9, 14), price=10.0):
+def label_at(day=date(2023, 9, 14), price=10.0):  # noqa: D401
     return Label(symbol="AAA", observed_at=datetime(2023, 9, 13, tzinfo=UTC),
                  entry_day=day, entry_price=price, returns={5: 0.01},
                  coverage=Coverage.COMPLETE)
@@ -325,3 +325,34 @@ def test_t12_two_entry_days_on_one_symbol_get_different_features():
 
     assert early and late
     assert early["distance_from_high"] != late["distance_from_high"]
+
+
+# --- T4 regression: the gate must see the REAL fallback share ---------------
+
+def test_fallback_rate_is_zero_before_anything_is_charged():
+    """The bug the first CI run exposed. `fallback_rate()` reports 0.0 until
+    charges happen, so passing it as an argument to sweep() evaluated it too
+    early and the COST_NOT_MEASURED gate could never fire. The run printed
+    '0% of trades charged the fallback' beside a summary saying 99.5%, and six
+    candidates passed a cost gate that had not been applied."""
+    table = CostTable(Bars(n=0))
+
+    assert table.fallback_rate() == 0.0, "no charges yet"
+
+    table(label_at())
+
+    assert table.fallback_rate() == 1.0, "the rate only exists after charging"
+
+
+def test_charging_every_label_first_yields_the_share_the_gate_needs():
+    """The fix: a pre-pass over the labels, so the share is known before the
+    sweep rather than after it."""
+    table = CostTable(Bars(n=0))
+    labels = [label_at(date(2023, 9, 5)), label_at(date(2023, 10, 5))]
+
+    for lab in labels:
+        table(lab)
+
+    assert table.fallback_rate() > 0
+    assert judge(make(), None, fallback_share=table.fallback_rate(),
+                 coverage=1.0) == Verdict.COST_NOT_MEASURED

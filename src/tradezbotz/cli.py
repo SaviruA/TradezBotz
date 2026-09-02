@@ -1540,11 +1540,31 @@ def cmd_measure(args: argparse.Namespace) -> int:
         # population does this result describe". fallback_share is filled after
         # the sweep, since CostTable only learns it while charging.
         coverage = float(cov.get("complete_rate", 0.0) or 0.0)
+
+        # Charge every label ONCE before the sweep, so the fallback share is
+        # known when the gate needs it.
+        #
+        # Passing `costs.fallback_rate()` straight into the call evaluated it
+        # before the sweep had charged anything, so it was always 0.0 and the
+        # COST_NOT_MEASURED gate could never fire. The first CI run reported
+        # "0% of trades charged the fallback" beside a cost summary saying
+        # 99.5% -- six candidates passed a cost gate that had not been applied.
+        #
+        # The pre-pass also warms the (symbol, month) memo, so the sweep itself
+        # gets cheaper rather than more expensive.
+        fallback_share = 0.0
+        if costs is not None:
+            for lab in labels:
+                if lab.returns:
+                    costs(lab)
+            fallback_share = costs.fallback_rate()
+            print(f"cost provenance: {fallback_share:.1%} of charges used the "
+                  f"fallback constant")
+
         assessments = sweep(
             cands, labels, payloads, registry=registry, horizons=horizons,
             costs=costs, partition=args.partition, dataset=fingerprint,
-            coverage=coverage,
-            fallback_share=(costs.fallback_rate() if costs else 0.0),
+            coverage=coverage, fallback_share=fallback_share,
         )
     except SweepError as exc:
         print(str(exc), file=sys.stderr)
