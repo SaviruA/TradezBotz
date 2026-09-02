@@ -15,6 +15,7 @@ re-litigated every few months.
 | OpenAlice | refused, redundant | AGPL-3.0 |
 | paperclip | refused, out of scope | MIT |
 | worldmonitor | refused as a data source; possible ops surface later | AGPL-3.0 |
+| FinceptTerminal | refused; source catalogue only, licence risk | AGPL-3.0 / disputed |
 
 ---
 
@@ -291,3 +292,87 @@ is not evidence of usage here, and the contribution count is.** Read the second.
 not on the popularity. The community's own usage pattern -- run it, or fork it
 into another dashboard -- is exactly the role we identified as the only one it
 could play here, and only once something is deployed to monitor.
+
+---
+
+## FinceptTerminal — refused, with a licence caveat worth reading
+
+Evaluated 2026-09-02. [Fincept-Corporation/FinceptTerminal](https://github.com/Fincept-Corporation/FinceptTerminal).
+30,891 stars, 4,364 forks. Suggested as "exactly what we are doing".
+
+**It is not the same category.** A Qt/C++ desktop terminal with Python scripts
+behind it, for interactive exploration. We are a headless research pipeline
+whose output is a measured verdict. Overlap is in the data sources, not the
+purpose.
+
+### The 448 "strategies" are QuantConnect LEAN code
+
+Counted, not inferred:
+
+| | |
+| --- | --- |
+| files importing `from AlgorithmImports import *` (LEAN-specific) | 419 |
+| files carrying LEAN's `### <summary>` docstring markers | 321 |
+| files headed "Copyright (c) 2024-2026 Fincept Corporation. All rights reserved." | 419 |
+| leftover `content="using quantconnect"` provenance tags | 27 |
+| mentions of QuantConnect in LICENSE or README | **0** |
+
+Each file also carries a synthetic "Strategy ID: FCT-…" and the label "Fincept
+Terminal - Strategy Engine". LEAN is Apache-2.0, which requires retaining
+attribution.
+
+**A second problem sits underneath the first**: these are not strategies at all.
+`BasicTemplateAlgorithm`, `AddAlphaModelAlgorithm`,
+`AsynchronousUniverseRegressionAlgorithm` — they are LEAN's own *regression test*
+algorithms. Vendoring them yields a directory that looks like a 448-strategy
+library and is a copy of somebody's CI fixtures.
+
+**The licence is also internally inconsistent**: the repository LICENSE is
+AGPL-3.0, while the strategy file headers claim MIT, over code whose upstream is
+Apache-2.0. Whatever the intent, that is three incompatible claims about the
+same files, and it is a real risk to anyone adopting the code rather than a
+pedantic point.
+
+### The agents are LLM-driven
+
+75 of 178 agent files reference OpenAI, Anthropic, LangChain, Ollama or GPT,
+including `hedgeFundAgents/renaissance_technologies_hedge_fund_agent`. That runs
+straight into the standing refusal: no LLM output feeds a backtest, because the
+lookahead lives in the weights where no audit of the data path can find it.
+
+### The 320 data connectors are the only genuinely interesting part
+
+And they are breadth without the discipline we need. **Two of 320** reference a
+filing date, `as_of`, or any point-in-time concept.
+
+Their `sec_xbrl_data.py` hits exactly the endpoint we do — 162 lines, no cache,
+no filtering on `filed`. Ours has `visible(facts, as_of)`, a gzipped facts cache,
+TTM assembly and the valuation multiples. Theirs is a display fetcher; the
+difference is the whole reason we use the SEC rather than a vendor.
+
+**What is worth taking is the list, not the code.** Sources we had not
+considered, each of which would need its own point-in-time treatment:
+
+- **OpenSecrets** — political donation data, adjacent to the congressional work
+- **ACLED** — armed conflict event data, adjacent to the geopolitical regime
+- **Databento** — one of only two connectors that mentions point-in-time
+- **akshare** — a large China-market family, out of scope for a US universe
+
+### Community signals, and the same shape as worldmonitor
+
+147 issues, 105 merged pull requests, ~8 contributors with one dominant (822
+commits). Real development, but modest relative to 31k stars. Forks are 14.1% of
+stars where 5-10% is typical, and watchers 0.56% where 2-5% is. As with
+worldmonitor: the star count is not evidence of usage; the contribution count
+is, and it reads as a small active team rather than a large user base.
+
+### Verdict
+
+**Adopt nothing.** Not in part and not in full. The strategies are someone
+else's test fixtures under a contested licence, the agents are the thing we have
+already refused on principle, and the connectors lack the one property that
+makes a source usable here.
+
+**What would reverse this:** nothing about the code. The source catalogue is
+worth keeping as a shopping list, and OpenSecrets and ACLED are worth their own
+evaluation on their own merits.
