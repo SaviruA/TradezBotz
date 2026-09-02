@@ -308,9 +308,13 @@ def report(assessments: Sequence[Assessment],
     apparatus exists to avoid producing.
     """
     lines: list[str] = []
+    # `w-mean` is the winsorised mean, shown beside the raw one because the
+    # gap between them IS the finding whenever it is large. A +35% mean that
+    # winsorises to +3% is a handful of microcap moonshots, not a strategy, and
+    # a reader who sees only the raw column has no way to tell.
     header = (
-        f"{'candidate':<30}{'h':>3}{'trades':>8}{'mean':>9}{'net':>9}"
-        f"{'t(cl)':>7}{'DSR':>7}{'cov':>6}  verdict"
+        f"{'candidate':<30}{'h':>3}{'trades':>8}{'mean':>9}{'w-mean':>9}"
+        f"{'net':>9}{'t(cl)':>7}{'DSR':>7}{'cov':>6}  verdict"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -321,7 +325,7 @@ def report(assessments: Sequence[Assessment],
         net = f"{r.mean_return_net:+.2%}" if r.costed else "  --  "
         lines.append(
             f"{a.name[:29]:<30}{a.horizon:>3}{r.n_trades:>8,}"
-            f"{r.mean_return:>+9.2%}{net:>9}"
+            f"{r.mean_return:>+9.2%}{r.mean_return_winsorised:>+9.2%}{net:>9}"
             f"{r.t_stat_clustered:>+7.2f}{r.deflated_sharpe:>7.3f}"
             f"{a.coverage:>6.0%}  {a.verdict}"
         )

@@ -356,3 +356,24 @@ def test_charging_every_label_first_yields_the_share_the_gate_needs():
     assert table.fallback_rate() > 0
     assert judge(make(), None, fallback_share=table.fallback_rate(),
                  coverage=1.0) == Verdict.COST_NOT_MEASURED
+
+
+def test_the_report_shows_the_winsorised_mean_beside_the_raw_one(reg):
+    """A +35% mean that winsorises to +3% is a few microcap moonshots, not a
+    strategy. The gap is the finding, and a reader seeing only the raw column
+    has no way to tell."""
+    from datetime import UTC as _UTC
+
+    labels = [Label(symbol=f"S{i%40}", observed_at=datetime(2025, 3, 4, tzinfo=_UTC),
+                    entry_day=date(2025, 1, 1) + timedelta(days=i % 100),
+                    entry_price=10.0, returns={5: (3.0 if i == 0 else 0.001)},
+                    coverage=Coverage.COMPLETE) for i in range(200)]
+    out = sweep([Candidate("a", everything, "r", controlled=False)],
+                labels, [{} for _ in labels], registry=reg, horizons=(5,),
+                coverage=0.8)
+    text = report(out)
+
+    assert "w-mean" in text
+    raw = out[0].result.mean_return
+    wins = out[0].result.mean_return_winsorised
+    assert raw > wins * 3, "one 300% move should dominate the raw mean"
