@@ -376,3 +376,70 @@ makes a source usable here.
 **What would reverse this:** nothing about the code. The source catalogue is
 worth keeping as a shopping list, and OpenSecrets and ACLED are worth their own
 evaluation on their own merits.
+
+### FinceptTerminal, second pass — what the first review missed
+
+The first pass judged the repo on its strategies and agents and stopped. That
+was too quick: it never opened `Analytics/` (345 files) and never probed the
+API. Both turned up something, and the verdict on the *code* is unchanged while
+the verdict on what is **worth learning from it** is not.
+
+**There is a real, live API.** `api.fincept.in` is operational, v3.0.0, with a
+717KB OpenAPI spec and **780 endpoints**. But the composition matters:
+
+| group | endpoints | what it is |
+| --- | --- | --- |
+| `quantlib` | **590** | QuantLib (open source) exposed over HTTP. Use the library directly |
+| `user` / `admin` | 65 | their own account plumbing |
+| `macro` | 16 | **the genuinely interesting part** — see below |
+| `research` | 15 | LLM chat, inference, web search, PDF extract |
+| `market` | 9 | yfinance-shaped ticker data; Alpaca SIP is better for us |
+| `analytics` | 9 | login audits and subscription metrics — *their* telemetry, not financial analytics |
+
+So "500+ API endpoints" is literally true and 76% of it is a wrapper around one
+open-source library. Everything requires an `X-API-Key`, so the data itself
+could not be assessed.
+
+**`Analytics/` is ~16 thin wrappers around good libraries.** ffn, PyPortfolioOpt,
+Riskfolio-Lib, skfolio, QuantStats, statsmodels, GluonTS, gs-quant, pmdarima,
+py_vollib, vnpy, tsmoothie. Plus 28,904 lines of backtesting wrappers around
+vectorbt, zipline, bt and backtesting.py.
+
+**Zero of those 28,904 lines mention lookahead, point-in-time, or
+survivorship.** For a backtesting layer, omitting the two failure modes that
+make a backtest worthless is the whole story in one number.
+
+### Two things genuinely worth taking away
+
+Neither is their code. Both are pointers we would not otherwise have had.
+
+**1. Portfolio optimisation libraries, for the open T10.** We have no position
+sizing beyond an equal split, which is the crude assumption underneath every
+impact figure. PyPortfolioOpt, Riskfolio-Lib and skfolio are all mature and all
+address exactly that. Worth evaluating **directly**, not through a wrapper.
+
+**2. The `/macro` data family.** Sovereign CDS, credit ratings, central bank
+rates, bond spreads, inverted yields, CEIC series. That is regime-conditioner
+shaped -- the same shape as the geopolitical risk index we just built, which is
+currently our most interesting untested candidate. Whether it is usable depends
+entirely on whether history is available point-in-time, which needs an account
+to find out.
+
+### Marketing against repository
+
+Recorded because the gaps are checkable and they bear on trust:
+
+- the org page badges FinceptTerminal **MIT**; the repository LICENSE is
+  **AGPL-3.0**; the strategy headers claim **MIT** over Apache-2.0 upstream
+- the org advertises **Quantcept** as a second product; its own badge reads
+  *"repo not found"*, and the org has three public repos: FinceptTerminal,
+  quantcept-marketplace (7 stars) and .github
+- "professional-grade... the rigor that funds and family offices expect" sits
+  against a backtesting layer with no lookahead or survivorship handling
+
+### Verdict, unchanged on code and softened on value
+
+**Still adopt nothing from the repository.** But the second look was worth it:
+the portfolio-optimisation libraries address a real open gap of ours, and the
+macro data family is worth an account to evaluate. The first review would have
+left both undiscovered.
