@@ -1339,11 +1339,28 @@ def cmd_measure(args: argparse.Namespace) -> int:
         print(f"no events in the {args.partition} partition", file=sys.stderr)
         return 1
     if args.limit:
-        # Head, not a sample: the split is chronological and taking a random
-        # subset would scatter the trades across the window while claiming the
-        # sample size of a contiguous one.
-        rows = rows[: args.limit]
-        print(f"limited to the first {len(rows):,}")
+        # TAIL, not head. Contiguous either way -- the split is chronological
+        # and a random subset would scatter trades across the window while
+        # claiming the sample size of a contiguous one -- but which end matters
+        # enormously, and taking the head was silently destroying the cost model.
+        #
+        # Alpaca's history begins in 2016 and the train partition starts there
+        # too. The OLDEST events therefore have no prior bars to estimate a
+        # spread from: EDGE needs 21 sessions before the entry month and there
+        # are none. The first run limited to the head charged the 93bps fallback
+        # on 99.3% of trades, so every cost figure was a constant rather than a
+        # measurement, and nothing could clear the cost gate on principle.
+        #
+        # The tail of the partition has the deepest prior history available, so
+        # it is where costs can actually be measured. The bias this introduces
+        # is stated rather than hidden: a limited run measures the LATER part of
+        # its partition, which is a different population from the whole of it.
+        rows = rows[-args.limit:]
+        first = datetime.fromisoformat(rows[0]["observed_at"]).date()
+        last = datetime.fromisoformat(rows[-1]["observed_at"]).date()
+        print(f"limited to the most recent {len(rows):,} of the partition "
+              f"({first} to {last}) -- the oldest events have no prior bars to "
+              f"price a spread from")
 
     events = [
         {"symbol": r["symbol"], "observed_at": r["observed_at"]} for r in rows

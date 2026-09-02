@@ -377,3 +377,17 @@ def test_the_report_shows_the_winsorised_mean_beside_the_raw_one(reg):
     raw = out[0].result.mean_return
     wins = out[0].result.mean_return_winsorised
     assert raw > wins * 3, "one 300% move should dominate the raw mean"
+
+
+def test_a_limited_run_takes_the_most_recent_events_not_the_oldest():
+    """Alpaca's history starts in 2016 and so does the train partition, so the
+    OLDEST events have no prior bars for EDGE to price a spread from. Taking the
+    head charged the fallback constant on 99.3% of trades and made the cost gate
+    unpassable on principle rather than on merit."""
+    rows = [{"observed_at": f"20{16 + i // 100:02d}-01-01T00:00:00+00:00"}
+            for i in range(500)]
+
+    head, tail = rows[:100], rows[-100:]
+
+    assert head[0]["observed_at"] < tail[0]["observed_at"], (
+        "the tail must be the later, better-covered end of the partition")
