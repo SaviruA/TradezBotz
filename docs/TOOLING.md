@@ -443,3 +443,45 @@ Recorded because the gaps are checkable and they bear on trust:
 the portfolio-optimisation libraries address a real open gap of ours, and the
 macro data family is worth an account to evaluate. The first review would have
 left both undiscovered.
+
+### Following up: PyPortfolioOpt and Riskfolio-Lib against T10
+
+Evaluated 2026-09-02, having flagged them as the promising find. **They are the
+wrong tool**, and the investigation was still worth doing because of what it
+turned up instead.
+
+**Why they do not fit.** Portfolio optimisers solve "allocate across a fixed
+universe, given expected returns and a covariance matrix". Our strategy is an
+event study: signals arrive one at a time, positions enter and exit on their own
+schedules, and the universe is whatever filed a Form 4 that week. Measured on
+12,051 open-market buys, distinct symbols held simultaneously:
+
+| horizon | median | p90 | max |
+| --- | --- | --- | --- |
+| 1 day | 34 | 55 | 85 |
+| 5 days | **97** | 161 | 222 |
+| 20 days | 267 | 419 | 487 |
+
+Estimating a 97x97 covariance matrix on microcaps, re-fitted as positions churn
+daily, is not a better answer than equal weighting -- it is a worse one with more
+moving parts. The right literature for sequential bets is volatility-scaled
+sizing, and `costs.daily_volatility` already computes the input.
+
+**What the investigation actually found.** `max_concurrent_positions` in the
+committed criteria is **10**. The real figure at a 5-day horizon is **97**, so
+position size is $258 rather than the assumed $2,500 -- an order of magnitude.
+
+The error runs in the safe direction for cost (the backtest charges impact for
+positions ten times larger than the strategy would take, so it over-estimates)
+but it hides a genuine strategy question. **$25,000 spread over 97 positions is
+$258 each**, which is not a position so much as a rounding error. Three ways
+out, and they are different strategies:
+
+1. **Cap concurrency and rank.** Requires a ranking rule, which is a new
+   selection decision and has to be measured like any other.
+2. **Raise capital.** Changes the impact profile and needs re-costing.
+3. **Narrow the filter.** Fewer signals, fewer positions, and a different
+   candidate.
+
+`deployment.sizing_warning` now reports the gap on every `measure` run rather
+than leaving the assumption unchecked.

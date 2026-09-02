@@ -241,3 +241,73 @@ def test_the_report_says_plainly_that_nothing_can_pass():
 
     assert "CRITERIA UNCONFIRMED" in text
     assert "0 of 1" in text
+
+
+# --- concurrency: the assumption that sets position size --------------------
+
+def _labels(n_symbols, n_days=200, per_day=15):
+    from datetime import UTC, date, datetime, timedelta
+
+    from tradezbotz.research.labeler import Coverage, Label
+    out = []
+    for i in range(n_days * per_day):
+        out.append(Label(
+            symbol=f"S{i % n_symbols}", observed_at=datetime(2025, 1, 1, tzinfo=UTC),
+            entry_day=date(2025, 1, 1) + timedelta(days=i % n_days),
+            entry_price=10.0, returns={1: 0.01, 5: 0.01, 20: 0.01},
+            coverage=Coverage.COMPLETE))
+    return out
+
+
+def test_concurrency_is_measured_not_assumed():
+    """The criteria assume 10 concurrent positions. Taking every open-market buy
+    at a 5-day horizon holds a median of 97 distinct symbols -- an order of
+    magnitude out, which mis-prices impact on every trade."""
+    from tradezbotz.research.deployment import concurrent_positions
+
+    stats = concurrent_positions(_labels(n_symbols=97), horizon=5)
+
+    assert stats["median"] > 50
+    assert stats["max"] >= stats["median"]
+
+
+def test_a_concurrency_overrun_is_reported_with_the_real_position_size():
+    from tradezbotz.research.deployment import sizing_warning
+
+    msg = sizing_warning(_labels(n_symbols=97), 5, confirmed())
+
+    assert "against an assumed 10" in msg
+    assert "larger than the strategy would take" in msg
+    assert "cap concurrency and rank" in msg
+
+
+def test_concurrency_within_the_assumption_is_reported_as_fine():
+    from tradezbotz.research.deployment import sizing_warning
+
+    msg = sizing_warning(_labels(n_symbols=4, per_day=2), 1, confirmed())
+
+    assert "within the assumed" in msg
+
+
+def test_a_label_missing_that_horizon_is_not_counted_as_held():
+    """A position is only held if it was actually taken at that horizon.
+    Counting labels whose return never resolved would inflate concurrency and
+    shrink position size for trades that were never made."""
+    from datetime import UTC, date, datetime
+
+    from tradezbotz.research.deployment import concurrent_positions
+    from tradezbotz.research.labeler import Coverage, Label
+
+    only_h5 = [Label(symbol="A", observed_at=datetime(2025, 1, 1, tzinfo=UTC),
+                     entry_day=date(2025, 1, 1), entry_price=10.0,
+                     returns={5: 0.01}, coverage=Coverage.COMPLETE)]
+
+    assert concurrent_positions(only_h5, 5)["median"] == 1
+    assert concurrent_positions(only_h5, 20) == {}
+
+
+def test_concurrency_on_an_empty_label_set_is_silent():
+    from tradezbotz.research.deployment import concurrent_positions, sizing_warning
+
+    assert concurrent_positions([], 5) == {}
+    assert sizing_warning([], 5, confirmed()) == ""

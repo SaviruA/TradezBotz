@@ -1561,6 +1561,19 @@ def cmd_measure(args: argparse.Namespace) -> int:
             print(f"cost provenance: {fallback_share:.1%} of charges used the "
                   f"fallback constant")
 
+        # Does the criteria file's concurrency assumption survive the data?
+        # It sets position size, and position size sets market impact, so a
+        # wrong assumption mis-prices every trade.
+        try:
+            from .research.deployment import load as _lc, sizing_warning
+            _crit = _lc()
+            for _h in horizons:
+                msg = sizing_warning(labels, _h, _crit)
+                if msg:
+                    print(msg)
+        except Exception:  # noqa: BLE001 - diagnostics must not stop the sweep
+            pass
+
         assessments = sweep(
             cands, labels, payloads, registry=registry, horizons=horizons,
             costs=costs, partition=args.partition, dataset=fingerprint,

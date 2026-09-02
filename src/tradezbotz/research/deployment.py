@@ -266,3 +266,63 @@ def report(results: Sequence[GateResult], criteria: Criteria) -> str:
     if criteria.signed_off:
         lines.append(f"criteria signed off: {criteria.signed_off}")
     return "\n".join(lines)
+
+
+def concurrent_positions(labels, horizon: int) -> dict:
+    """How many distinct symbols the strategy would actually hold at once.
+
+    The number that sets position size, and the one `max_concurrent_positions`
+    is supposed to describe. Measured rather than assumed, because the gap
+    turned out to be an order of magnitude: the criteria assumed 10, and taking
+    every open-market buy at a 5-day horizon holds a median of 97.
+
+    That gap runs in the safe direction for costs -- the backtest charges impact
+    for positions ten times larger than the strategy would take, so it
+    over-estimates cost -- but it is still wrong, and it hides a real strategy
+    question. At $25,000 over 97 positions each is $258, which is not a position
+    so much as a rounding error. Either concurrency is capped, which requires a
+    ranking rule and therefore a new selection decision that has to be measured,
+    or the capital is wrong, or the filter is too broad.
+    """
+    from collections import defaultdict
+    from datetime import timedelta
+
+    held: dict = defaultdict(set)
+    for lab in labels:
+        if not lab.symbol or lab.entry_day is None or horizon not in lab.returns:
+            continue
+        for k in range(horizon):
+            held[lab.entry_day + timedelta(days=k)].add(lab.symbol)
+    if not held:
+        return {}
+    counts = sorted(len(v) for v in held.values())
+    return {
+        "median": counts[len(counts) // 2],
+        "p90": counts[int(len(counts) * 0.9)],
+        "max": counts[-1],
+        "days": len(counts),
+    }
+
+
+def sizing_warning(labels, horizon: int, criteria: Criteria) -> str:
+    """Flag a criteria assumption that the data contradicts."""
+    stats = concurrent_positions(labels, horizon)
+    if not stats:
+        return ""
+    med = stats["median"]
+    assumed = criteria.max_concurrent_positions
+    if med <= assumed:
+        return (f"concurrency h={horizon}: median {med} symbols held, within the "
+                f"assumed {assumed}")
+    real = criteria.capital_at_risk / med if med else 0.0
+    return (
+        f"concurrency h={horizon}: median {med} symbols held (p90 {stats['p90']}, "
+        f"max {stats['max']}), against an assumed {assumed}.\n"
+        f"  Position size is therefore ${real:,.0f}, not "
+        f"${criteria.position_notional:,.0f} -- the backtest is charging impact "
+        f"for positions {med / assumed:.0f}x larger than the strategy would "
+        f"take.\n"
+        f"  Pessimistic on cost, which is the safe direction, but it hides the "
+        f"real question: cap concurrency and rank (a new selection decision), "
+        f"raise capital, or narrow the filter."
+    )
