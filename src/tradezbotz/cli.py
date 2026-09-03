@@ -1300,25 +1300,31 @@ def cmd_ingest_fundamentals(args: argparse.Namespace) -> int:
         lock.release()
 
 
-def _history_floor(bars_path: Path, basis: str, days: int) -> date | None:
-    """First day an event can be measured, or None if the cache is empty.
+def _history_floors(bars_path: Path, basis: str, days: int) -> dict[str, date]:
+    """Per-symbol first measurable day, empty if the floor is disabled.
 
     Deliberately derived from the CACHE rather than from the partition start.
-    The constraint is how far back the vendor's history actually goes, which
+    The constraint is how far back each symbol's history actually goes, which
     has nothing to do with where a split boundary happens to fall -- flooring
     from the partition instead would wrongly discard the opening months of
     validation and holdout, where history is already deep.
+
+    PER SYMBOL, because a single global floor is nearly useless. Cached symbols
+    begin in 2016, 2019, 2022, 2023 and 2024; a floor taken from the earliest
+    of them lets a 2024 listing's first-week events through with no prior
+    history at all, and those are precisely the events that get charged a
+    fallback constant instead of a measured spread.
     """
     if days <= 0:
-        return None
+        return {}
     from .research.prices import PriceCache
 
     cache = PriceCache(bars_path)
     try:
-        earliest = cache.earliest_day(basis)
+        firsts = cache.first_days(basis)
     finally:
         cache.close()
-    return earliest + timedelta(days=days) if earliest else None
+    return {sym: first + timedelta(days=days) for sym, first in firsts.items()}
 
 
 def cmd_measure(args: argparse.Namespace) -> int:
@@ -1418,16 +1424,23 @@ def cmd_measure(args: argparse.Namespace) -> int:
     # be distinguished from that one regime. The floor below is the precise
     # version of the same correction: drop only what genuinely cannot be priced.
     basis = BASIS_TOTAL if args.basis == "total" else BASIS_PRICE
-    floor_day = _history_floor(bars_path, basis, args.history_floor_days)
-    if floor_day is not None:
+    floors = _history_floors(bars_path, basis, args.history_floor_days)
+    if floors:
         before = len(rows)
+        # A symbol with NO bars keeps its events. They label NO_DATA and show
+        # up in the coverage report, which is the honest place for them --
+        # dropping them here would quietly raise the apparent coverage rate by
+        # deleting the evidence of what is missing.
         rows = [r for r in rows
-                if datetime.fromisoformat(r["observed_at"]).date() >= floor_day]
+                if (r["symbol"] or "").upper() not in floors
+                or datetime.fromisoformat(r["observed_at"]).date()
+                >= floors[(r["symbol"] or "").upper()]]
         dropped = before - len(rows)
         if dropped:
-            print(f"history floor {floor_day}: dropped {dropped:,} events with "
-                  f"under {args.history_floor_days} days of prior price history "
-                  f"({len(rows):,} remain)")
+            print(f"history floor: dropped {dropped:,} events whose own symbol "
+                  f"had under {args.history_floor_days} days of prior price "
+                  f"history ({len(rows):,} remain, across {len(floors):,} "
+                  f"symbols with their own floors)")
         if not rows:
             print("every event predates usable price history", file=sys.stderr)
             return 1

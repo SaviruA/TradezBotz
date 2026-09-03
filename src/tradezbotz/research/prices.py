@@ -314,6 +314,24 @@ class PriceCache:
         row = self._conn.execute(sql, params).fetchone()
         return date.fromisoformat(row[0]) if row and row[0] else None
 
+    def first_days(self, basis: str | None = None) -> dict[str, date]:
+        """Each symbol's oldest bar, which is the only floor that means anything.
+
+        A single global minimum is nearly useless here: cached symbols begin in
+        2016, 2019, 2022, 2023 and 2024, so a floor set from the earliest of
+        them lets a 2024 listing's first-week events through with no prior
+        history at all -- and those are exactly the events that get charged a
+        fallback cost constant instead of a measured spread.
+        """
+        sql = "SELECT symbol, MIN(day) FROM bars"
+        params: tuple = ()
+        if basis is not None:
+            sql += " WHERE basis = ?"
+            params = (basis,)
+        sql += " GROUP BY symbol"
+        return {r[0]: date.fromisoformat(r[1])
+                for r in self._conn.execute(sql, params) if r[1]}
+
 
 class MassivePriceSource:
     """Massive (formerly Polygon.io) daily aggregates.

@@ -18,7 +18,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from tradezbotz.cli import _history_floor
+from tradezbotz.cli import _history_floors
 from tradezbotz.research.prices import BASIS_PRICE, BASIS_TOTAL, Bar, PriceCache, Series
 
 
@@ -45,16 +45,31 @@ def test_the_floor_is_measured_from_the_cache_not_the_partition(tmp_path):
     cache = _cache(tmp_path, date(2016, 1, 4))
     cache.close()
 
-    floor = _history_floor(tmp_path / "bars.db", BASIS_TOTAL, 300)
+    floors = _history_floors(tmp_path / "bars.db", BASIS_TOTAL, 300)
 
-    assert floor == date(2016, 1, 4) + timedelta(days=300)
+    assert floors["AAA"] == date(2016, 1, 4) + timedelta(days=300)
+
+
+def test_each_symbol_gets_its_own_floor(tmp_path):
+    """A single global minimum is nearly useless: cached symbols begin in 2016,
+    2019, 2022, 2023 and 2024, so a floor taken from the earliest lets a 2024
+    listing's first-week events through with no prior history at all -- exactly
+    the events that get charged a fallback constant."""
+    cache = _cache(tmp_path, date(2016, 1, 4))
+    cache.put(_series("NEW", date(2024, 3, 1), 50, BASIS_TOTAL))
+    cache.close()
+
+    floors = _history_floors(tmp_path / "bars.db", BASIS_TOTAL, 300)
+
+    assert floors["AAA"] == date(2016, 1, 4) + timedelta(days=300)
+    assert floors["NEW"] == date(2024, 3, 1) + timedelta(days=300)
 
 
 def test_a_zero_floor_is_disabled_rather_than_zero_days(tmp_path):
     cache = _cache(tmp_path, date(2016, 1, 4))
     cache.close()
 
-    assert _history_floor(tmp_path / "bars.db", BASIS_TOTAL, 0) is None
+    assert _history_floors(tmp_path / "bars.db", BASIS_TOTAL, 0) == {}
 
 
 def test_an_empty_cache_floors_nothing_rather_than_dropping_everything(tmp_path):
@@ -62,7 +77,7 @@ def test_an_empty_cache_floors_nothing_rather_than_dropping_everything(tmp_path)
     reads as "no events" rather than "no prices"."""
     PriceCache(tmp_path / "bars.db").close()
 
-    assert _history_floor(tmp_path / "bars.db", BASIS_TOTAL, 300) is None
+    assert _history_floors(tmp_path / "bars.db", BASIS_TOTAL, 300) == {}
 
 
 def test_the_floor_respects_the_basis_it_was_asked_for(tmp_path):
@@ -72,11 +87,11 @@ def test_the_floor_respects_the_basis_it_was_asked_for(tmp_path):
     cache.put(_series("BBB", date(2020, 1, 2), 10, BASIS_PRICE))
     cache.close()
 
-    total = _history_floor(tmp_path / "bars.db", BASIS_TOTAL, 300)
-    price = _history_floor(tmp_path / "bars.db", BASIS_PRICE, 300)
+    total = _history_floors(tmp_path / "bars.db", BASIS_TOTAL, 300)
+    price = _history_floors(tmp_path / "bars.db", BASIS_PRICE, 300)
 
-    assert total == date(2016, 1, 4) + timedelta(days=300)
-    assert price == date(2020, 1, 2) + timedelta(days=300)
+    assert total == {"AAA": date(2016, 1, 4) + timedelta(days=300)}
+    assert price == {"BBB": date(2020, 1, 2) + timedelta(days=300)}
 
 
 def test_earliest_day_across_all_bases(tmp_path):
