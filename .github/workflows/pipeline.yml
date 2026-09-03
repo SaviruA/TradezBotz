@@ -33,6 +33,9 @@ on:
       intraday_minutes:
         description: "Minutes for the intraday step. 15 keeps it out of the measurement loop's way; raise it with intraday_days when deepening coverage deliberately"
         default: "15"
+      measure_limit:
+        description: "Events sampled for measurement, at a uniform stride across the partition. Raise to tighten the estimate; the cost is roughly linear in distinct (symbol, day) pairs"
+        default: "40000"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -328,6 +331,13 @@ jobs:
       # fetching, and --limit because feature enrichment costs roughly a
       # millisecond per (symbol, day) pair and the event store is large.
       #
+      # --limit now samples at a UNIFORM STRIDE rather than taking the tail, and
+      # that costs real time: 40,000 events inside one 52-day window collapsed
+      # to 7,696 distinct (symbol, day) pairs, where the same 40,000 spread
+      # across five years touch several times as many. Hence 90 minutes rather
+      # than 20. The headroom is there -- the whole run finished in 85 of 330
+      # budgeted -- and the alternative is a sample that only sees one regime.
+      #
       # The split dates are PINNED and must not be edited casually. Derived
       # boundaries move as events accumulate, which silently relocates the
       # sealed holdout and changes train composition between runs -- results
@@ -341,10 +351,10 @@ jobs:
       - name: Measure the candidate backlog
         id: measure
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 90
         run: |
           python -m tradezbotz measure \
-            --limit 40000 \
+            --limit ${{ github.event.inputs.measure_limit || '40000' }} \
             --split-start "${{ vars.SPLIT_START || '2016-01-01' }}" \
             --split-end "${{ vars.SPLIT_END || '2026-06-30' }}"
 

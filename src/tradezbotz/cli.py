@@ -1273,6 +1273,27 @@ def cmd_ingest_fundamentals(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def _history_floor(bars_path: Path, basis: str, days: int) -> date | None:
+    """First day an event can be measured, or None if the cache is empty.
+
+    Deliberately derived from the CACHE rather than from the partition start.
+    The constraint is how far back the vendor's history actually goes, which
+    has nothing to do with where a split boundary happens to fall -- flooring
+    from the partition instead would wrongly discard the opening months of
+    validation and holdout, where history is already deep.
+    """
+    if days <= 0:
+        return None
+    from .research.prices import PriceCache
+
+    cache = PriceCache(bars_path)
+    try:
+        earliest = cache.earliest_day(basis)
+    finally:
+        cache.close()
+    return earliest + timedelta(days=days) if earliest else None
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     """Run the backlog against the labelled event population.
 
@@ -1355,36 +1376,63 @@ def cmd_measure(args: argparse.Namespace) -> int:
     if not rows:
         print(f"no events in the {args.partition} partition", file=sys.stderr)
         return 1
-    if args.limit:
-        # TAIL, not head. Contiguous either way -- the split is chronological
-        # and a random subset would scatter trades across the window while
-        # claiming the sample size of a contiguous one -- but which end matters
-        # enormously, and taking the head was silently destroying the cost model.
+    # The history floor, applied before any subsampling.
+    #
+    # Alpaca's history begins in 2016 and the train partition starts there too,
+    # so the OLDEST events have no prior bars to estimate a spread from: EDGE
+    # needs 21 sessions and a 200-day moving average needs 200. Measuring them
+    # anyway charged the 93bps fallback constant on 99.3% of trades, making
+    # every cost figure a constant rather than a measurement.
+    #
+    # An earlier fix took the TAIL of the partition instead. That did fix the
+    # cost model -- fallback fell to 1.9% -- but it was a blunt instrument for a
+    # narrow problem: it cut a 2,108-day partition down to the last 52 days, so
+    # the sample sat entirely inside late 2021 and any "edge" it found could not
+    # be distinguished from that one regime. The floor below is the precise
+    # version of the same correction: drop only what genuinely cannot be priced.
+    basis = BASIS_TOTAL if args.basis == "total" else BASIS_PRICE
+    floor_day = _history_floor(bars_path, basis, args.history_floor_days)
+    if floor_day is not None:
+        before = len(rows)
+        rows = [r for r in rows
+                if datetime.fromisoformat(r["observed_at"]).date() >= floor_day]
+        dropped = before - len(rows)
+        if dropped:
+            print(f"history floor {floor_day}: dropped {dropped:,} events with "
+                  f"under {args.history_floor_days} days of prior price history "
+                  f"({len(rows):,} remain)")
+        if not rows:
+            print("every event predates usable price history", file=sys.stderr)
+            return 1
+
+    if args.limit and len(rows) > args.limit:
+        # A UNIFORM STRIDE across the partition, not either end of it.
         #
-        # Alpaca's history begins in 2016 and the train partition starts there
-        # too. The OLDEST events therefore have no prior bars to estimate a
-        # spread from: EDGE needs 21 sessions before the entry month and there
-        # are none. The first run limited to the head charged the 93bps fallback
-        # on 99.3% of trades, so every cost figure was a constant rather than a
-        # measurement, and nothing could clear the cost gate on principle.
+        # Both ends are biased samples of the partition, just in opposite
+        # directions, and time is confounded with regime: 2016-2021 contains the
+        # 2018Q4 selloff, the COVID crash and the 2021 mania, and a contiguous
+        # slice sees exactly one of them. A candidate that survives a stride
+        # crossing all three has evidence behind it; one measured inside a
+        # single regime has a description of that regime.
         #
-        # The tail of the partition has the deepest prior history available, so
-        # it is where costs can actually be measured. The bias this introduces
-        # is stated rather than hidden: a limited run measures the LATER part of
-        # its partition, which is a different population from the whole of it.
-        rows = rows[-args.limit:]
+        # The earlier comment here claimed a scattered subset would "claim the
+        # sample size of a contiguous one". That was wrong, and backwards:
+        # scattering trades across more distinct dates gives the two-way
+        # cluster-robust estimator MORE effective independence, not less, so if
+        # anything it makes the reported t-stat harder to clear, not easier.
+        stride = len(rows) / args.limit
+        rows = [rows[int(i * stride)] for i in range(args.limit)]
         first = datetime.fromisoformat(rows[0]["observed_at"]).date()
         last = datetime.fromisoformat(rows[-1]["observed_at"]).date()
-        print(f"limited to the most recent {len(rows):,} of the partition "
-              f"({first} to {last}) -- the oldest events have no prior bars to "
-              f"price a spread from")
+        print(f"sampled {len(rows):,} events uniformly across the partition "
+              f"({first} to {last}, every {stride:.1f}th event) -- the span is "
+              f"the point: a contiguous slice measures one regime")
 
     events = [
         {"symbol": r["symbol"], "observed_at": r["observed_at"]} for r in rows
     ]
     payloads = [r["payload"] for r in rows]
 
-    basis = BASIS_TOTAL if args.basis == "total" else BASIS_PRICE
     cache = PriceCache(bars_path)
     source = CachedOnlySource(cache, basis=basis)
 
@@ -1807,8 +1855,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "a price-only series fabricates a loss on every "
                          "ex-dividend date")
     ms.add_argument("--limit", type=int, default=0,
-                    help="cap events measured, taken chronologically from the "
-                         "start of the partition")
+                    help="cap events measured, sampled at a UNIFORM STRIDE "
+                         "across the partition so the sample spans every regime "
+                         "in it rather than one contiguous slice")
+    ms.add_argument("--history-floor-days", type=int, default=300,
+                    help="days of prior price history an event needs to be "
+                         "measurable. Events closer than this to the start of "
+                         "the cache cannot be costed (EDGE needs 21 sessions) "
+                         "or enriched (a 200-day average needs 200), and "
+                         "measuring them charges a fallback constant instead. "
+                         "Zero disables the floor")
     ms.add_argument("--no-features", dest="features", action="store_false",
                     help="skip indicator enrichment. Drops the indicator "
                          "candidates from the sweep entirely rather than "

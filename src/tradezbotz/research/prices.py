@@ -296,6 +296,24 @@ class PriceCache:
         return [r[0] for r in self._conn.execute(
             "SELECT basis FROM fetches WHERE symbol = ? ORDER BY basis", (symbol,))]
 
+    def earliest_day(self, basis: str | None = None) -> date | None:
+        """The oldest bar held, which bounds what any backtest can measure.
+
+        An event needs prior sessions before it can be enriched or costed --
+        EDGE wants 21, a 200-day moving average wants 200 -- and no amount of
+        care recovers history the vendor does not sell. Events closer to this
+        date than the deepest indicator's lookback are therefore not
+        measurable, and `measure` drops them explicitly rather than letting
+        them silently charge a fallback constant.
+        """
+        sql = "SELECT MIN(day) FROM bars"
+        params: tuple = ()
+        if basis is not None:
+            sql += " WHERE basis = ?"
+            params = (basis,)
+        row = self._conn.execute(sql, params).fetchone()
+        return date.fromisoformat(row[0]) if row and row[0] else None
+
 
 class MassivePriceSource:
     """Massive (formerly Polygon.io) daily aggregates.
