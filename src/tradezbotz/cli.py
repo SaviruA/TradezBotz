@@ -918,7 +918,7 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
     staleness rather than forget it.
     """
     from .lock import SingleInstance
-    from .research.edgar import EdgarClient
+    from .research.edgar import EdgarClient, EdgarError
     from .research.eventstore import EventStore
     from .research.holdings import (
         FORMS_13DG, FORMS_13F, HOUSE_BULK, extract_pdf_text, ingest_day,
@@ -935,13 +935,23 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
         if args.kind in ("both", "sec"):
             client = EdgarClient()
             client.verify_access()
-            end = args.end or date.today()
+            # Yesterday, not today. EDGAR publishes a daily index after its
+            # filing day closes, so today's cannot exist when this runs at
+            # 01:33 ET -- and `days.reverse()` put it first, making it the very
+            # first request of the step. It answered 503, which escaped the
+            # guards as a bare HTTPError and killed the command before a single
+            # disclosure was ingested. Every night.
+            #
+            # The cost of the clamp is one day of latency against lags of 45
+            # days (13F) and 5 business days (13D), which is nothing.
+            end = args.end or (date.today() - timedelta(days=1))
             start = args.start or (end - timedelta(days=args.days))
             days = [start + timedelta(days=i)
                     for i in range((end - start).days + 1)
                     if (start + timedelta(days=i)).weekday() < 5]
             days.reverse()
             forms = FORMS_13F + FORMS_13DG
+            unavailable: list[date] = []
             for day in days:
                 if deadline and time.monotonic() > deadline:
                     print("time budget reached; remaining days left for next run",
@@ -951,7 +961,15 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
                 if not args.force and store.day_ingested(marker, day):
                     continue
                 events = []
-                for parsed in ingest_day(client, day, forms):
+                try:
+                    parsed_day = list(ingest_day(client, day, forms))
+                except EdgarError:
+                    # An index that is not published, or EDGAR unwell. Neither
+                    # is a reason to abandon the other 119 days -- and the day
+                    # is not marked ingested, so the next run retries it.
+                    unavailable.append(day)
+                    continue
+                for parsed in parsed_day:
                     try:
                         made = (list(parsed.to_events())
                                 if hasattr(parsed, "to_events") else [parsed.to_event()])
@@ -965,6 +983,15 @@ def cmd_ingest_holdings(args: argparse.Namespace) -> int:
                 if events:
                     print(f"{day}  13F/13D events {len(events):6d}  new {new:6d}",
                           flush=True)
+
+            # Reported, never silent. What hid the crash for nights was that
+            # its only symptom was downstream: the joins said "0 symbols carry
+            # a disclosure", which reads as a fact about the market rather than
+            # a fact about the fetch.
+            if unavailable:
+                print(f"{len(unavailable)} day(s) unavailable from EDGAR "
+                      f"({unavailable[-1]} to {unavailable[0]}); not marked "
+                      f"ingested, so the next run retries them", flush=True)
 
         if args.kind in ("both", "house"):
             import requests

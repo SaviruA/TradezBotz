@@ -44,6 +44,10 @@ FORM4_CUTOFF = dtime(22, 0)
 ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})")
 
 MAX_REQUESTS_PER_SECOND = 8  # below the SEC's 10/s ceiling, with headroom
+#: 5xx from EDGAR is ambiguous -- an index that is not published yet, or a
+#: server under load -- so it is retried before being treated as the former.
+SERVER_ERROR_RETRIES = 2
+SERVER_ERROR_BACKOFF = 1.0
 
 #: `issuerTradingSymbol` is free text and filers treat it as such. Measured over
 #: 4,740 distinct symbols in the store, 50 (1.1%) were unusable as written and
@@ -268,22 +272,49 @@ class EdgarClient:
         )
         self._last_request = 0.0
 
-    def _get(self, url: str) -> str:
-        elapsed = time.monotonic() - self._last_request
-        min_gap = 1.0 / MAX_REQUESTS_PER_SECOND
-        if elapsed < min_gap:
-            time.sleep(min_gap - elapsed)
-        resp = self._session.get(url, timeout=30)
-        self._last_request = time.monotonic()
-        if resp.status_code == 404:
-            raise FileNotFoundError(url)
-        if resp.status_code == 403:
-            raise EdgarError(
-                f"SEC returned 403 for {url}. Usually a missing or rejected "
-                "User-Agent, or exceeding the rate limit."
-            )
-        resp.raise_for_status()
-        return resp.text
+    def _get(self, url: str, *, retries: int = SERVER_ERROR_RETRIES) -> str:
+        """Fetch a URL, mapping SEC's status codes onto our own exceptions.
+
+        **Every failure leaves here as FileNotFoundError or EdgarError, never as
+        a bare requests.HTTPError.** Callers guard on those two, and a third
+        escaping type walks straight through the guards: a 503 on today's
+        not-yet-published daily index crashed the holdings ingest on its first
+        request every single night, so 13F, 13D/G and congressional disclosures
+        were never ingested at all and the joins reported "0 symbols carry a
+        disclosure" as though that were a finding about the market.
+
+        5xx is retried before being surrendered to, because it is genuinely
+        ambiguous: SEC returns it both for an index that does not exist yet and
+        for a server under load. Retrying separates most of the second case
+        from the first.
+        """
+        for attempt in range(retries + 1):
+            elapsed = time.monotonic() - self._last_request
+            min_gap = 1.0 / MAX_REQUESTS_PER_SECOND
+            if elapsed < min_gap:
+                time.sleep(min_gap - elapsed)
+            resp = self._session.get(url, timeout=30)
+            self._last_request = time.monotonic()
+            if resp.status_code == 404:
+                raise FileNotFoundError(url)
+            if resp.status_code == 403:
+                raise EdgarError(
+                    f"SEC returned 403 for {url}. Usually a missing or rejected "
+                    "User-Agent, or exceeding the rate limit."
+                )
+            if resp.status_code >= 500:
+                if attempt < retries:
+                    time.sleep(SERVER_ERROR_BACKOFF * (2 ** attempt))
+                    continue
+                raise EdgarError(
+                    f"SEC returned {resp.status_code} for {url} after "
+                    f"{retries + 1} attempts. For a daily index this usually "
+                    "means it is not published yet; for anything else it means "
+                    "EDGAR is unwell."
+                )
+            resp.raise_for_status()
+            return resp.text
+        raise EdgarError(f"unreachable: retry loop exhausted for {url}")
 
     def verify_access(self) -> None:
         """Confirm our User-Agent is accepted before interpreting any 403s.
