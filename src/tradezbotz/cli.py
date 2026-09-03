@@ -1507,9 +1507,18 @@ def cmd_measure(args: argparse.Namespace) -> int:
             if listed[0] and delisted[0] and lr > 0 and dr < lr * 0.5:
                 print(f"  WARNING: delisted names label at {dr:.1%} against "
                       f"{lr:.1%} for listed ones. The backtest population is "
-                      "skewed toward survivors by roughly that gap, and returns "
-                      "measured on it are biased upward by an amount nothing "
-                      "here can estimate. Backfill the delisted symbols.")
+                      "skewed toward survivors by roughly that gap. Backfill "
+                      "the delisted symbols.")
+
+            # The bias is quantified rather than deplored. The old warning said
+            # it was "an amount nothing here can estimate", which let the
+            # largest known bias in the system sit as a caveat -- and it only
+            # printed at all when delisted labelling fell below half of listed,
+            # so at 78.4% against 87.9% it stayed silent while the bias was
+            # still worth several points of return.
+            from .research.survivorship import bound as _survivorship_bound
+
+            print(_survivorship_bound(buckets).describe())
         catalog.close()
 
     # The specific trap this catches: the default basis is total-return on the
