@@ -101,8 +101,24 @@ def label_event(
     *,
     horizons: Sequence[int] = DEFAULT_HORIZONS,
     as_of: date | None = None,
+    entry_delay: int = 0,
 ) -> Label:
-    """Compute forward returns for one event against one symbol's bars."""
+    """Compute forward returns for one event against one symbol's bars.
+
+    `entry_delay` skips whole sessions between the first tradeable open and the
+    one actually bought. Zero is the honest primary measurement -- delaying
+    entry gives up real alpha when the signal carries information, because
+    information decays -- but one is the standard diagnostic for separating
+    information from microstructure.
+
+    The reason it matters here: Conrad, Gultekin & Kaul (1997) found short-term
+    reversal profits are PREDOMINANTLY driven by bid-ask bounce, and a
+    "buy after a fall" signal in illiquid microcaps is exactly that setup. An
+    oversold name's opening print sits toward the bid, and its drift back to
+    mid is booked as profit by any close-based return. Skipping a session is
+    the standard remedy: a genuine information effect survives it, a bounce
+    artefact does not.
+    """
     if not series.bars:
         return Label(
             symbol=series.symbol, observed_at=observed_at, entry_day=None,
@@ -111,6 +127,14 @@ def label_event(
         )
 
     idx = _entry_index(series, observed_at)
+    if idx is not None and entry_delay:
+        # Past the end is NO_ENTRY_BAR, not a clamp to the last bar. Clamping
+        # would silently enter on a different session from the one asked for,
+        # and the delayed run would no longer be comparable to the undelayed
+        # one -- which is the entire point of running it.
+        idx = idx + entry_delay
+        if idx >= len(series.bars):
+            idx = None
     if idx is None:
         return Label(
             symbol=series.symbol, observed_at=observed_at, entry_day=None,
@@ -162,9 +186,11 @@ class Labeller:
         source: PriceSource,
         *,
         horizons: Sequence[int] = DEFAULT_HORIZONS,
+        entry_delay: int = 0,
     ) -> None:
         self.source = source
         self.horizons = tuple(horizons)
+        self.entry_delay = int(entry_delay)
 
     def label(self, events: Iterable[dict]) -> list[Label]:
         """Label events, where each event has `symbol` and `observed_at`.
@@ -202,10 +228,11 @@ class Labeller:
         for symbol, items in by_symbol.items():
             times = [t for _, t in items]
             start = min(times).date()
-            end = _pad_end(max(times).date(), max(self.horizons))
+            end = _pad_end(max(times).date(), max(self.horizons) + self.entry_delay)
             series = self.source.daily_bars(symbol, start, end)
             for i, t in items:
-                out[i] = label_event(series, t, horizons=self.horizons)
+                out[i] = label_event(series, t, horizons=self.horizons,
+                                     entry_delay=self.entry_delay)
 
         return [lab for lab in out if lab is not None]
 

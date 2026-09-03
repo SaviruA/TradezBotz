@@ -1437,7 +1437,13 @@ def cmd_measure(args: argparse.Namespace) -> int:
     source = CachedOnlySource(cache, basis=basis)
 
     started = time.monotonic()
-    labels = Labeller(source, horizons=horizons).label(events)
+    if args.entry_delay:
+        print(f"entry delayed by {args.entry_delay} session(s) -- this is the "
+              "bid-ask bounce diagnostic, not a tradeable configuration. An "
+              "information effect survives the skip; a microstructure artefact "
+              "does not")
+    labels = Labeller(source, horizons=horizons,
+                      entry_delay=args.entry_delay).label(events)
     print(f"labelled in {time.monotonic() - started:.0f}s -- {source.summary()}")
 
     cov = coverage_report(labels)
@@ -1858,6 +1864,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="cap events measured, sampled at a UNIFORM STRIDE "
                          "across the partition so the sample spans every regime "
                          "in it rather than one contiguous slice")
+    ms.add_argument("--entry-delay", type=int, default=0,
+                    help="sessions to skip between the first tradeable open and "
+                         "the one bought. 0 is the real measurement; 1 is the "
+                         "standard bid-ask bounce diagnostic (Conrad, Gultekin "
+                         "& Kaul 1997) -- a reversal signal that only pays "
+                         "without the skip is microstructure, not information")
     ms.add_argument("--history-floor-days", type=int, default=300,
                     help="days of prior price history an event needs to be "
                          "measurable. Events closer than this to the start of "
