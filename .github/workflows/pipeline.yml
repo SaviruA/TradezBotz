@@ -36,6 +36,9 @@ on:
       measure_limit:
         description: "Events sampled for measurement, at a uniform stride across the partition. Raise to tighten the estimate; the cost is roughly linear in distinct (symbol, day) pairs"
         default: "40000"
+      measure_horizons:
+        description: "Holding periods in sessions. Every strongest row in the 4.7-year sweep sat at the LONGEST horizon measured, because a round-trip cost amortises over a longer hold -- so the ceiling is worth probing"
+        default: "1,5,20"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -338,6 +341,10 @@ jobs:
       # than 20. The headroom is there -- the whole run finished in 85 of 330
       # budgeted -- and the alternative is a sample that only sees one regime.
       #
+      # Measured at 40,000: 28,456 pairs, 19 min enrich + 25 min join. Pairs
+      # scale roughly with the sample, so 100,000 is around 110 minutes and the
+      # step timeout goes to 150. That run itself took 121 of 330.
+      #
       # The split dates are PINNED and must not be edited casually. Derived
       # boundaries move as events accumulate, which silently relocates the
       # sealed holdout and changes train composition between runs -- results
@@ -351,10 +358,11 @@ jobs:
       - name: Measure the candidate backlog
         id: measure
         continue-on-error: true
-        timeout-minutes: 90
+        timeout-minutes: 150
         run: |
           python -m tradezbotz measure \
             --limit ${{ github.event.inputs.measure_limit || '40000' }} \
+            --horizons "${{ github.event.inputs.measure_horizons || '1,5,20' }}" \
             --split-start "${{ vars.SPLIT_START || '2016-01-01' }}" \
             --split-end "${{ vars.SPLIT_END || '2026-06-30' }}"
 
