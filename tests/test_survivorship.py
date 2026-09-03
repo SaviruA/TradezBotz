@@ -55,7 +55,7 @@ def test_a_gap_too_small_for_the_old_warning_still_produces_a_bound():
 # --- the arithmetic ---------------------------------------------------------
 
 def test_the_map_is_linear_and_weighted_by_counts():
-    b = Bound(measured=90, unmeasured_delisted=10, unmeasured_unknown=0,
+    b = Bound(measured=90, unmeasured_delisted=10, unmeasured_elsewhere=(),
               delisting_return=-0.50)
 
     assert b.weight == pytest.approx(0.9)
@@ -100,8 +100,26 @@ def test_unknown_classification_is_excluded_from_the_bound_but_reported():
 
     assert b.unmeasured_unknown == 570
     assert b.weight == pytest.approx(33_809 / (33_809 + 1_431))
-    assert "excluded from the bound" in b.describe()
+    assert "EXCLUDED from the" in b.describe()
     assert "beyond this one" in b.describe()
+
+
+def test_otc_shortfall_is_reported_and_not_silently_dropped():
+    """OTC labels at 41.5% against 87.9% for listed. Those 755 unmeasured
+    events are not classified "delisted" -- OTC is a venue, not a status -- but
+    a microcap that trades there and cannot be priced is not neutral either.
+    Omitting them from the report understates the worst case."""
+    b = bound(REAL)
+
+    assert dict(b.unmeasured_elsewhere)["otc"] == 755
+    assert "755 otc" in b.describe()
+
+
+def test_every_non_delisted_shortfall_is_accounted_for():
+    b = bound(REAL)
+
+    assert dict(b.unmeasured_elsewhere) == {"otc": 755, "unknown": 570,
+                                            "listed": 3_435}
 
 
 def test_the_description_says_plainly_that_nothing_is_adjusted():

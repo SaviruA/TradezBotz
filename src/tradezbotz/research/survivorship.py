@@ -39,10 +39,17 @@ from dataclasses import dataclass
 #: rather than the -30% NYSE/AMEX figure because this universe is microcaps.
 DELISTING_RETURN = -0.55
 
-#: Classifications whose unmeasured events are treated as delistings. "unknown"
-#: is deliberately EXCLUDED from the base case and reported separately: it
-#: certainly contains delistings, but folding it in would overstate a bound
-#: that is already the pessimistic end of the range.
+#: The only classification whose unmeasured events are charged the delisting
+#: return. Every other unmeasured event is EXCLUDED from the arithmetic and
+#: reported separately, because folding them in would overstate a bound that is
+#: already the pessimistic end of its range -- while omitting them silently
+#: would understate the true worst case. Both failures are avoidable at once by
+#: computing one and printing the other.
+#:
+#: This matters most for OTC, which labels at 41.5% against 87.9% for listed.
+#: Those unmeasured events are not classified "delisted" -- OTC is a venue, not
+#: a status -- but a microcap that trades there and cannot be priced is not a
+#: neutral omission either.
 DELISTED = "delisted"
 
 
@@ -52,8 +59,14 @@ class Bound:
 
     measured: int
     unmeasured_delisted: int
-    unmeasured_unknown: int
+    #: Unmeasured events by classification, excluding `delisted`. Not folded
+    #: into the map; reported so the reader knows the bound is not the floor.
+    unmeasured_elsewhere: tuple[tuple[str, int], ...]
     delisting_return: float
+
+    @property
+    def unmeasured_unknown(self) -> int:
+        return dict(self.unmeasured_elsewhere).get("unknown", 0)
 
     @property
     def weight(self) -> float:
@@ -87,12 +100,17 @@ class Bound:
             "  This is a BOUND, not a correction -- nothing here is adjusted, "
             "because replacing a known bias with an assumed one moves the guess "
             "rather than removing it.")
-        if self.unmeasured_unknown:
+        elsewhere = [(c, n) for c, n in self.unmeasured_elsewhere if n]
+        if elsewhere:
+            total = sum(n for _c, n in elsewhere)
+            detail = ", ".join(f"{n:,} {c}" for c, n in elsewhere)
             lines.append(
-                f"  {self.unmeasured_unknown:,} unmeasured events are of "
-                f"UNKNOWN classification and are excluded from the bound. They "
-                f"certainly contain delistings, so the true worst case is "
-                f"beyond this one.")
+                f"  A further {total:,} events went unmeasured outside the "
+                f"delisted bucket ({detail}) and are EXCLUDED from the "
+                f"arithmetic. Unknown-classification names certainly contain "
+                f"delistings, and an OTC microcap that cannot be priced is not "
+                f"a neutral omission either -- so the true worst case is beyond "
+                f"this one.")
         return "\n".join(lines)
 
 
@@ -105,10 +123,14 @@ def bound(buckets: dict[str, list[int]],
     """
     measured = sum(ok for _seen, ok in buckets.values())
     seen_d, ok_d = buckets.get(DELISTED, [0, 0])
-    seen_u, ok_u = buckets.get("unknown", [0, 0])
+    elsewhere = tuple(
+        (cls, max(seen - ok, 0))
+        for cls, (seen, ok) in sorted(buckets.items())
+        if cls != DELISTED and seen - ok > 0
+    )
     return Bound(
         measured=measured,
         unmeasured_delisted=max(seen_d - ok_d, 0),
-        unmeasured_unknown=max(seen_u - ok_u, 0),
+        unmeasured_elsewhere=elsewhere,
         delisting_return=delisting_return,
     )
