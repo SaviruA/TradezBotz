@@ -30,6 +30,9 @@ on:
       intraday_days:
         description: "Days of intraday history to reduce. 180 keeps steady state; raise it to deepen coverage toward the 3800-day labelling window"
         default: "180"
+      intraday_minutes:
+        description: "Minutes for the intraday step. 15 keeps it out of the measurement loop's way; raise it with intraday_days when deepening coverage deliberately"
+        default: "15"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -265,6 +268,22 @@ jobs:
       # Time-boxed: this is the one step whose cost scales with symbols x
       # sessions, so it gets a budget rather than a symbol count and resumes
       # from its own checkpoint next run.
+      # Budget cut 120 -> 15 on 2026-09-03, and the reason is not cost.
+      #
+      # The train partition runs 2016-01-01 to 2021-10-09. `--days 180` covers
+      # the last six months. THEY DO NOT OVERLAP, so the profile join cannot
+      # enrich a single training event -- it reported "0 events enriched" while
+      # this step consumed 100 of a 219-minute run.
+      #
+      # Closing that gap needs ~6.2M sessions, about 15 hours of fetching. That
+      # is a deliberate decision to make the twelve microstructure candidates
+      # testable, not something to do accidentally at 100 minutes a night while
+      # the measurement loop waits. Raise `intraday_minutes` and `intraday_days`
+      # together when that decision is taken.
+      #
+      # Meanwhile 351,046 of 511,365 stored sessions predate the
+      # session-sequence fields and need `--refresh-untimed`; they are equally
+      # blocked on the same decision.
       - name: Reduce intraday sessions
         id: intraday
         continue-on-error: true
@@ -274,7 +293,7 @@ jobs:
         run: |
           python -m tradezbotz backfill-intraday \
             --days "${{ github.event.inputs.intraday_days || 180 }}" \
-            --minutes 120 --batch 50
+            --minutes "${{ github.event.inputs.intraday_minutes || 15 }}" --batch 50
 
       # XBRL company facts, one request per issuer covering every concept and
       # period they have ever reported. Measurement has to be offline -- the SEC

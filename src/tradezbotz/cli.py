@@ -1181,6 +1181,23 @@ def cmd_repair_symbols(args: argparse.Namespace) -> int:
 
     verb = "would move" if args.dry_run else "moved"
     print(f"\n{verb} {moved:,} events onto a usable ticker")
+
+    # The queue is a separate table and this command did not touch it, so a
+    # ticker already enqueued as '"OMEX"' stayed enqueued that way, burned its
+    # three attempts and parked. CI still carried 169 such rows after the event
+    # store itself was clean.
+    ckpt_path = DEFAULT_STATE / CHECKPOINT_DB
+    if ckpt_path.exists() and not args.dry_run:
+        from .research.backfill import repair_queue
+
+        runner = _make_runner(need_source=False)
+        try:
+            stats = repair_queue(runner, normalise_symbol)
+            print(f"backfill queue: {stats['repaired']:,} rows repaired, "
+                  f"{stats['dropped']:,} unusable rows dropped, "
+                  f"{stats['already_ok']:,} already clean")
+        finally:
+            runner.close()
     if unusable and args.dry_run:
         print(f"\nunusable (left alone): {', '.join(repr(u) for u in unusable[:20])}")
     store.close()

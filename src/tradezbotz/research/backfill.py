@@ -273,3 +273,41 @@ def symbols_from_events(events: Iterable[dict]) -> list[str]:
     """Distinct, sorted symbols from an event iterable."""
     seen = {(e.get("symbol") or "").upper() for e in events}
     return sorted(s for s in seen if s)
+
+
+def repair_queue(runner, normalise) -> dict:
+    """Rewrite mangled tickers sitting in the backfill queue.
+
+    `repair-symbols` fixes the event store, and that is where symbols come
+    from -- but the queue is a separate table with its own rows, so a ticker
+    already enqueued as `"OMEX"` (quote marks included) stays enqueued that way,
+    fails its three attempts, and parks. After the event store was repaired the
+    CI queue still carried 169 such rows.
+
+    A repaired symbol is inserted as PENDING if it is not already known, and the
+    mangled row is deleted. An existing good row keeps its status, so a symbol
+    already fetched is not refetched.
+    """
+    rows = list(runner._conn.execute("SELECT symbol, status FROM backfill"))
+    now = datetime.now(timezone.utc).isoformat()
+    stats = {"scanned": len(rows), "repaired": 0, "dropped": 0, "already_ok": 0}
+
+    for row in rows:
+        raw = row["symbol"]
+        fixed = normalise(raw)
+        if fixed == raw:
+            stats["already_ok"] += 1
+            continue
+        if fixed:
+            existing = runner._conn.execute(
+                "SELECT 1 FROM backfill WHERE symbol = ?", (fixed,)).fetchone()
+            if existing is None:
+                runner._conn.execute(
+                    "INSERT INTO backfill (symbol, status, attempts, updated_at) "
+                    "VALUES (?,?,0,?)", (fixed, PENDING, now))
+            stats["repaired"] += 1
+        else:
+            stats["dropped"] += 1
+        runner._conn.execute("DELETE FROM backfill WHERE symbol = ?", (raw,))
+    runner._conn.commit()
+    return stats
