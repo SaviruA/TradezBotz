@@ -1610,9 +1610,37 @@ def cmd_measure(args: argparse.Namespace) -> int:
     # The fingerprint deliberately includes what would make the same hypothesis
     # a genuinely new look: the events measured, the window, the partition, the
     # price basis and the horizons. Change any of those and it IS a new trial.
+    #
+    # It describes the rows ACTUALLY MEASURED, and that is the whole subtlety.
+    # An earlier version took min/max from `observed` -- the full knowable
+    # window before partition filtering -- so its upper bound was the newest
+    # filing in the store and advanced every single night. The fingerprint
+    # churned, dedup never held, and each run minted a fresh 174 trials: the
+    # registry reached 690, almost exactly four nights of churn. The Deflated
+    # Sharpe bar was therefore being tightened by the CALENDAR rather than by
+    # any new hypothesis, which is both wrong and non-reproducible -- a
+    # candidate could pass tonight and fail next week having done nothing.
+    #
+    # Measured rows are stable for a pinned historical partition, because the
+    # 2016-2021 filings are all long since filed.
+    #
+    # The ~690 trials already registered under the churning fingerprint are
+    # NOT repaired, deliberately. Identity is (hypothesis, params, split,
+    # dataset), so collapsing them would mean grouping on the first three and
+    # discarding the fourth -- which cannot distinguish a phantom from the two
+    # genuine dataset changes (head sample, then tail) mixed in among them.
+    # Guessing wrong in that direction lowers N and makes the DSR bar MORE
+    # lenient, and this project's stated asymmetry is that a backtest may be
+    # pessimistic but must never be optimistic. So the inflated count stands:
+    # roughly a 13% higher significance bar than the truth, in the safe
+    # direction, decaying in relevance as correctly-counted trials accumulate.
+    measured = [datetime.fromisoformat(r["observed_at"]) for r in rows]
     fingerprint = hashlib.sha256("|".join([
-        str(len(rows)), str(min(observed).date()), str(max(observed).date()),
+        str(len(rows)), str(min(measured).date()), str(max(measured).date()),
         args.partition, basis, args.horizons, args.kind,
+        # Selection parameters: changing any of them is a genuinely new look at
+        # the same hypothesis, which is exactly what DSR must be told about.
+        str(args.limit), str(args.history_floor_days), str(args.entry_delay),
         str(args.features), str(args.joins), str(args.costs),
     ]).encode("utf-8")).hexdigest()[:16]
     print(f"dataset fingerprint: {fingerprint}")
