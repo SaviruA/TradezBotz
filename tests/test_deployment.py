@@ -311,3 +311,53 @@ def test_concurrency_on_an_empty_label_set_is_silent():
 
     assert concurrent_positions([], 5) == {}
     assert sizing_warning([], 5, confirmed()) == ""
+
+
+# --- concurrency measured on a SAMPLE ---------------------------------------
+
+def test_a_sample_cannot_clear_the_concurrency_assumption():
+    """The failure this prevents: a 1-in-41 stride sees 1/41 of the events per
+    day, so concurrency looks comfortably inside the assumption. That is an
+    artefact of sampling read as a property of the strategy, and it arrives
+    exactly when the results start being trusted."""
+    from tradezbotz.research.deployment import sizing_warning
+
+    msg = sizing_warning(_labels(n_symbols=4, per_day=2), 1, confirmed(),
+                         sampled_fraction=0.024)
+
+    assert "LOWER BOUND and not a pass" in msg
+    assert "within the assumed" not in msg
+
+
+def test_a_full_population_within_the_assumption_still_passes_cleanly():
+    from tradezbotz.research.deployment import sizing_warning
+
+    msg = sizing_warning(_labels(n_symbols=4, per_day=2), 1, confirmed(),
+                         sampled_fraction=1.0)
+
+    assert "within the assumed" in msg
+
+
+def test_an_overrun_on_a_sample_says_the_true_figure_is_higher():
+    from tradezbotz.research.deployment import sizing_warning
+
+    msg = sizing_warning(_labels(n_symbols=97), 5, confirmed(),
+                         sampled_fraction=0.024)
+
+    assert "true figure is higher" in msg
+    assert "cap concurrency and rank" in msg
+
+
+def test_the_measured_count_is_never_scaled_up_to_fake_precision():
+    """Distinct symbols held saturates rather than growing linearly with event
+    count, so a scaled figure would be invented. The number stays what was
+    measured; only its interpretation changes."""
+    from tradezbotz.research.deployment import concurrent_positions, sizing_warning
+
+    labels = _labels(n_symbols=97)
+    full = sizing_warning(labels, 5, confirmed(), sampled_fraction=1.0)
+    part = sizing_warning(labels, 5, confirmed(), sampled_fraction=0.02)
+    med = concurrent_positions(labels, 5)["median"]
+
+    assert f"median {med} symbols" in full
+    assert f"median {med} symbols" in part

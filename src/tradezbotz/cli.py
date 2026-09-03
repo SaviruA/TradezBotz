@@ -1405,6 +1405,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
             print("every event predates usable price history", file=sys.stderr)
             return 1
 
+    sampled_fraction = 1.0
     if args.limit and len(rows) > args.limit:
         # A UNIFORM STRIDE across the partition, not either end of it.
         #
@@ -1421,6 +1422,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
         # cluster-robust estimator MORE effective independence, not less, so if
         # anything it makes the reported t-stat harder to clear, not easier.
         stride = len(rows) / args.limit
+        sampled_fraction = args.limit / len(rows)
         rows = [rows[int(i * stride)] for i in range(args.limit)]
         first = datetime.fromisoformat(rows[0]["observed_at"]).date()
         last = datetime.fromisoformat(rows[-1]["observed_at"]).date()
@@ -1656,7 +1658,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
             from .research.deployment import load as _lc, sizing_warning
             _crit = _lc()
             for _h in horizons:
-                msg = sizing_warning(labels, _h, _crit)
+                msg = sizing_warning(labels, _h, _crit, sampled_fraction)
                 if msg:
                     print(msg)
         except Exception:  # noqa: BLE001 - diagnostics must not stop the sweep

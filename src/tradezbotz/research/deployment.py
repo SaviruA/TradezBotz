@@ -304,20 +304,47 @@ def concurrent_positions(labels, horizon: int) -> dict:
     }
 
 
-def sizing_warning(labels, horizon: int, criteria: Criteria) -> str:
-    """Flag a criteria assumption that the data contradicts."""
+def sizing_warning(labels, horizon: int, criteria: Criteria,
+                   sampled_fraction: float = 1.0) -> str:
+    """Flag a criteria assumption that the data contradicts.
+
+    `sampled_fraction` is what share of the population these labels are, and
+    ignoring it inverts the warning. Concurrency is measured from the labels in
+    hand, so a 1-in-41 stride sees roughly 1/41 of the events per day and
+    reports concurrency that looks comfortably inside the assumption -- an
+    artefact of sampling read as a property of the strategy, arriving exactly
+    when the results start being trusted.
+
+    Scaling is deliberately NOT applied to the number: distinct symbols held
+    saturates rather than growing linearly, so a scaled figure would be a
+    fabricated precision. The measured value is reported as the LOWER BOUND it
+    is, and a sampled run cannot clear the assumption at all -- "not
+    contradicted on 2% of the data" is not evidence of anything.
+    """
     stats = concurrent_positions(labels, horizon)
     if not stats:
         return ""
     med = stats["median"]
     assumed = criteria.max_concurrent_positions
-    if med <= assumed:
+    sampled = 0 < sampled_fraction < 1
+    if med <= assumed and not sampled:
         return (f"concurrency h={horizon}: median {med} symbols held, within the "
                 f"assumed {assumed}")
+    if med <= assumed:
+        return (
+            f"concurrency h={horizon}: median {med} symbols held on a "
+            f"{sampled_fraction:.1%} sample, against an assumed {assumed}.\n"
+            f"  This is a LOWER BOUND and not a pass: the sample sees roughly "
+            f"1 event in {1 / sampled_fraction:.0f}, so the full population "
+            f"holds materially more. Re-measure on the full partition before "
+            f"treating the assumption as met."
+        )
     real = criteria.capital_at_risk / med if med else 0.0
+    on = (f" on a {sampled_fraction:.1%} sample, so the true figure is higher"
+          if sampled else "")
     return (
         f"concurrency h={horizon}: median {med} symbols held (p90 {stats['p90']}, "
-        f"max {stats['max']}), against an assumed {assumed}.\n"
+        f"max {stats['max']}){on}, against an assumed {assumed}.\n"
         f"  Position size is therefore ${real:,.0f}, not "
         f"${criteria.position_notional:,.0f} -- the backtest is charging impact "
         f"for positions {med / assumed:.0f}x larger than the strategy would "
