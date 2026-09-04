@@ -39,6 +39,9 @@ on:
       measure_horizons:
         description: "Holding periods in sessions. Every strongest row in the 4.7-year sweep sat at the LONGEST horizon measured, because a round-trip cost amortises over a longer hold -- so the ceiling is worth probing"
         default: "1,5,20"
+      measure_entry_delay:
+        description: "Sessions to skip between the first tradeable open and the one bought. 0 is the real measurement; 1 is the bid-ask bounce diagnostic (Conrad/Gultekin/Kaul) -- an information effect survives the skip, a microstructure artefact does not"
+        default: "0"
       holdings_days:
         description: "Days of EDGAR daily indexes to scan for 13F/13D. The default only reaches recent filings, while measurement runs 2016-2021 -- raise it deliberately to backfill history the join can actually reach"
         default: "120"
@@ -395,6 +398,7 @@ jobs:
           python -m tradezbotz measure \
             --limit ${{ github.event.inputs.measure_limit || '40000' }} \
             --horizons "${{ github.event.inputs.measure_horizons || '1,5,20' }}" \
+            --entry-delay ${{ github.event.inputs.measure_entry_delay || '0' }} \
             --split-start "${{ vars.SPLIT_START || '2016-01-01' }}" \
             --split-end "${{ vars.SPLIT_END || '2026-06-30' }}"
 
