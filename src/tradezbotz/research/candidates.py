@@ -465,6 +465,61 @@ def blocked_candidates() -> list[Candidate]:
                        "the same lookahead that rules out Yahoo for reported "
                        "figures. A vendor problem, not a data-availability one",
         ),
+        Candidate(
+            "congress: leadership only", everything,
+            "Follow purchases by members holding a leadership post at the time "
+            "of the trade, rather than by any member.",
+            prior="the only version the evidence supports. Broad congressional "
+                  "outperformance is NOT established -- NBER (Belmont et al. "
+                  "2020) found senators do not beat the market on average, and "
+                  "a 2026 study of 2012-2023 found members generally matched or "
+                  "underperformed. The exception is concentrated in leadership, "
+                  "where a 2025 working paper puts the gap at ~47pp annually "
+                  "after ascension, with alphas surviving construction from "
+                  "PUBLIC disclosure dates. `congress_bought` as it stands "
+                  "pools the two and measures mostly the null population",
+            blocked_by="needs a POINT-IN-TIME leadership roster: who held which "
+                       "post on which date. The status is time-varying and the "
+                       "whole finding is about what happens AFTER ascension, so "
+                       "a current roster applied to past trades is exactly the "
+                       "lookahead this system exists to prevent. We have the "
+                       "`member` field and no validated roster to match it to",
+        ),
+        Candidate(
+            "geopolitical exposure overlay", everything,
+            "Scale total deployed capital with the geopolitical regime rather "
+            "than gating individual entries on it.",
+            prior="how the index is actually used in practice. Global Macro "
+                  "funds show risk TIMING and other strategies show HEDGING "
+                  "against GPR; the published applications are portfolio-level "
+                  "allocation shifts, not per-stock entry filters. Our "
+                  "conditioner form (`buy + gpr_high`) is the right shape for "
+                  "the question we can currently ask, and the overlay is the "
+                  "shape the literature endorses",
+            blocked_by="needs portfolio construction, which does not exist. "
+                       "There is no position sizing to scale: the backtest is "
+                       "an event study taking every qualifying event, holding "
+                       "a measured median of 591 concurrent symbols at h=5 "
+                       "against an assumed 10",
+        ),
+        Candidate(
+            "sentiment as a veto", everything,
+            "Suppress entries during heightened NEGATIVE sentiment, rather "
+            "than treating sentiment as a source of alpha.",
+            prior="the practitioner form, and a different architecture from "
+                  "the one assumed here: measured sentiment scores are "
+                  "'employed as gating mechanisms to avoid or exit trades' "
+                  "rather than as directional signals. Note the horizon "
+                  "problem underneath it -- earnings-call sentiment shows a "
+                  "modest 1-day effect that vanishes by day 5, while our "
+                  "shortest horizon is 1 session and our best rows sit at 20 "
+                  "and 60. Even with perfect history the effect is largely "
+                  "dead by the time we would hold",
+            blocked_by="the same missing history as `news sentiment`: "
+                       "ApeWisdom serves no archive at any price and news "
+                       "coverage of this universe is near zero. A veto is no "
+                       "more backfillable than a signal",
+        ),
     ]
 
 

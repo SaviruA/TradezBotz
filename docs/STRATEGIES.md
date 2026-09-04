@@ -111,7 +111,8 @@ listed; crypto-only and broker-API entries were skipped.
 | hypothesis | status | where | notes |
 | --- | --- | --- | --- |
 | Insider buy (Form 4, code P) | built | `backtest` selectors | baseline event |
-| Opportunistic vs routine insider | built | `classify.RoutineClassifier` | Cohen/Malloy/Pomorski split |
+| Opportunistic vs routine insider | **built AND swept** | `classify.RoutineClassifier` + `joins.InsiderClassJoin` | Cohen/Malloy/Pomorski split. **Was marked "built" here for weeks while having zero imports from `candidates.py` — it had never appeared in a single sweep.** "Built" now requires a candidate, because a module nothing calls is indistinguishable from one that does not exist |
+| Liquidity cut (dollar volume, price floor) | built | `features.features_at`, `candidates.liquidity_candidates` | attacks the 82-of-232 "costs exceed edge" plurality. Thresholds are the published retail-quant convention ($5M/day, $3), taken as given rather than fitted |
 | Reddit sentiment rank | built | `apewisdom` | forward-only; no historical backfill yet |
 | **8-K material event (by item)** | built | `filings.is_results_8k` etc | item codes carry the signal; raw filing *frequency* is a NEGATIVE signal |
 | **424B offering / dilution** | built | `filings.is_immediate_dilution` | negative signal; offerings drop small caps 20-30% |
@@ -553,3 +554,83 @@ zero; `status` reports any untimed sessions as an outstanding refetch bill, and
 `backfill-intraday --refresh-untimed` pays it. `require_timing` refuses a mixed
 store rather than silently skipping old rows — skipping would make the sample
 definition a fact about deployment history rather than about the market.
+
+---
+
+## External validation, 2026-09-04
+
+Every method and null result above was checked against the published
+literature. The conclusion is that **our null reproduces the literature's
+null**, with one large omission that we had built and never run.
+
+### The null is the right null
+
+The single most reassuring finding. Our 5.5-year sweep returned 82 of 232
+verdicts as "costs exceed edge". The published result on insider signals is the
+same: abnormal returns *"vanish and even become negative when limiting the
+tradable dollar amount for each trading signal to a reasonable size"*, and are
+*"negatively correlated with stock liquidity, almost negating a potentially
+profitable and scalable trading strategy even before considering transaction
+costs."*
+
+We are not making an error. We are reproducing a documented result — which is
+the strongest evidence so far that the pipeline works.
+
+### Our fixes match the community remedies
+
+| our defect | remedy we applied | community standard |
+| --- | --- | --- |
+| 52-day contiguous sample | uniform stride across regimes | non-stationarity and regime shift are the canonical backtest killers |
+| bid-ask bounce on a reversal signal | `--entry-delay` skip session | Conrad/Gultekin/Kaul; skipping a period is the standard control |
+| delisting bias unquantified | −55% bound | Shumway (1997), Shumway & Warther (1999) |
+| trial-count inflation | DSR + two-way clustering | Bailey & López de Prado — standard, and known to be "correct but insufficient" |
+
+One check we still do **not** perform: degrees of freedom against independent
+observations. We run 58 candidates × 4 horizons over ~5.5 years.
+
+### The omission
+
+`RoutineClassifier` had zero imports. Cohen, Malloy & Pomorski (JF 2012) find
+routine trades are **over half the insider universe with essentially no
+predictive power**, and the remainder carried 82bp/month value-weighted. Every
+measurement this system produced pooled both populations. That is a plausible
+mechanism for turning a real edge into "costs exceed edge", and it is now wired
+with `routine buy` shipping as its control.
+
+### Where our usage was the wrong shape
+
+**Geopolitical risk.** Practitioners use GPR as a portfolio-level overlay —
+Global Macro funds for risk *timing*, others for *hedging*, commonly via
+precious metals. Not as a per-stock entry filter. Our conditioner form
+(`buy + gpr_high`) is the right question for a system with no portfolio; the
+overlay form is recorded as blocked on portfolio construction.
+
+**Sentiment.** Measured decay is a *"modest 1-day signal that vanishes by day
+5"*, and practitioners use scores as *"gating mechanisms to avoid or exit
+trades"* — a veto, not alpha. Our shortest horizon is 1 session and our
+strongest rows sit at 20 and 60, so even with perfect history the effect is
+largely dead before we would exit.
+
+### Congress, honestly
+
+Broad congressional outperformance is **not established**. NBER (Belmont et al.
+2020) found senators do not beat the market on average; a 2026 study of
+2012–2023 found members generally matched or underperformed. The exception is
+leadership, where a 2025 working paper puts the gap near 47pp annually after
+ascension — with alphas surviving construction from *public disclosure dates*.
+
+Disclosure lag makes it harder still: median 27 days for congressional trades
+against 2 days for Form 4, with 12.5% filed past the 45-day legal requirement.
+
+So `congress_bought` as it stands pools leaders with the null population.
+`congress: leadership only` is recorded as blocked on a point-in-time roster —
+current-roster matching would be lookahead, since the entire finding is about
+what happens *after* ascension.
+
+### 13F, honestly
+
+Cloning everything does not work; the documented success factor is *"select the
+right group of managers that have longer-term views on stock picks."* That is
+`13F filer persistence ranking`, still blocked on consecutive quarters. The
+CUSIP resolver removes the prior blocker — every 13F position was invisible for
+want of a ticker.
