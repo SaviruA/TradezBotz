@@ -32,6 +32,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
+from .concentration import analyse as analyse_concentration
 from .labeler import Coverage, Label
 from .trials import TrialRegistry, assess
 
@@ -108,6 +109,10 @@ class BacktestResult:
     n_symbols: int = 0
     top_symbol_share: float = 0.0
     mean_return_winsorised: float = 0.0
+    #: Whether the edge is broad or is a handful of names, plus the
+    #: skewness-adjusted inference that long horizons require. None when
+    #: there were too few trades to decompose.
+    concentration: object | None = None
     #: Mean return after round-trip transaction costs. Zero when no cost model
     #: was supplied, in which case `costed` is False and the gross figure is the
     #: only one that exists.
@@ -357,6 +362,15 @@ def run(
 
     mean = statistics.fmean(returns)
     mean_w = statistics.fmean(winsorise(returns))
+
+    # Decomposed on the NET series when we have one, because the question is
+    # about the return a portfolio would actually keep. Computed here because
+    # the per-trade returns do not survive onto the result -- reconstructing
+    # them later would mean re-running the whole labelling pass.
+    _net_series = ([r - c for r, c in zip(returns, cost_per_trade)]
+                   if cost_per_trade and len(cost_per_trade) == len(returns)
+                   else list(returns))
+    concentration = analyse_concentration(_net_series)
     costed = bool(cost_per_trade) and len(cost_per_trade) == len(returns)
     if costed:
         mean_net = statistics.fmean(
@@ -411,7 +425,7 @@ def run(
         rho=cluster.rho, se_inflation=cluster.inflation,
         clusters_sufficient=cluster.enough_clusters,
         mean_return_net=mean_net, median_cost_bps=median_cost_bps, costed=costed,
-        coverage=coverage,
+        coverage=coverage, concentration=concentration,
     )
 
 

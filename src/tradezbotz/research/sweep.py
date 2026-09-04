@@ -123,6 +123,11 @@ MIN_TRADES = 30
 #: about the strategy. A quarter is already generous.
 MAX_FALLBACK_SHARE = 0.25
 
+#: Rows whose return series is decomposed in the report. Enough to cover the
+#: candidates a reader would actually consider, few enough that the table stays
+#: readable -- the decomposition is several lines each.
+TOP_ROWS_DECOMPOSED = 8
+
 #: Share of the candidate population that must actually have been labellable.
 #: A result computed on 0.3% of events is a result about whichever symbols
 #: happened to be in the price cache, and the first candidate to clear the
@@ -334,6 +339,28 @@ def report(assessments: Sequence[Assessment],
     lines.append("")
     lines.append(f"{len(kept)} of {len(assessments)} measurements survived "
                  f"every gate.")
+
+    # Decompose the strongest rows, whether or not they were kept.
+    #
+    # The gates answer "is this distinguishable from noise". They do not answer
+    # "is this five names", and the two are independent: our best row so far
+    # reported a mean of +11.61% against a winsorised +2.65%, which are
+    # descriptions of completely different strategies. Nothing in the table
+    # above separates them.
+    #
+    # Printed for the top rows specifically because that is where the question
+    # gets asked, and because the skewness-adjusted inference below is the
+    # published remedy for exactly the long horizons these rows sit at.
+    strongest = [a for a in ordered
+                 if a.result.concentration is not None
+                 and a.result.mean_return_net > 0][:TOP_ROWS_DECOMPOSED]
+    if strongest:
+        lines.append("")
+        lines.append("strongest rows, decomposed -- a significance test cannot "
+                     "tell a broad edge from a handful of names:")
+        for a in strongest:
+            lines.append(f"  {a.name} h={a.horizon}")
+            lines.append(a.result.concentration.describe())
 
     # Provenance, stated once and prominently. A reader who does not know that
     # the cost figures came from a constant will read `net` as a measurement.
