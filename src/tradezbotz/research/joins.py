@@ -171,13 +171,22 @@ class HoldingsJoin:
 
     needs_payload = False
 
-    def __init__(self, store, window_days: int = RELATED_WINDOW_DAYS) -> None:
+    def __init__(self, store, window_days: int = RELATED_WINDOW_DAYS,
+                 cusip_map: dict[str, str] | None = None) -> None:
         self.store = store
         self.window_days = window_days
+        #: CUSIP -> ticker. Without it every 13F position is invisible here: a
+        #: 13F information table identifies holdings by CUSIP and issuer name
+        #: and never by ticker, so `Filing13F.to_events()` emits `symbol=None`
+        #: and the symbol filter below drops all of them. The run that first
+        #: ingested real 13F data added 124,786 events in a day and this join
+        #: still reported "0 symbols carry a disclosure".
+        self.cusip_map = cusip_map or {}
         self._by_symbol: dict[str, list[dict]] | None = None
         self.enriched = 0
         self.congress_hits = 0
         self.stake_hits = 0
+        self.unmapped_cusips: set[str] = set()
 
     def _index(self) -> dict[str, list[dict]]:
         """Load every congress/holding/stake disclosure once, keyed by symbol.
@@ -195,7 +204,18 @@ class HoldingsJoin:
             for row in self.store.as_of(far_future, kind=kind):
                 symbol = (row.get("symbol") or "").upper()
                 if not symbol:
-                    continue
+                    # A 13F position carries a CUSIP instead. Resolve it from
+                    # the cache -- never by matching the issuer NAME, which
+                    # would silently attach one company's disclosures to
+                    # another company's returns with nothing downstream saying
+                    # so. An unresolved CUSIP is counted and reported.
+                    payload = row.get("payload") or {}
+                    cusip = (payload.get("cusip") or "").upper()
+                    symbol = self.cusip_map.get(cusip, "")
+                    if not symbol:
+                        if cusip:
+                            self.unmapped_cusips.add(cusip)
+                        continue
                 index.setdefault(symbol, []).append({
                     "kind": kind,
                     "observed_at": datetime.fromisoformat(row["observed_at"]),
@@ -252,10 +272,15 @@ class HoldingsJoin:
 
     def summary(self) -> str:
         n = len(self._index()) if self._by_symbol is not None else 0
+        unmapped = ""
+        if self.unmapped_cusips:
+            unmapped = (f"; {len(self.unmapped_cusips):,} CUSIPs unresolved and "
+                        f"therefore invisible -- run `resolve-cusips`")
         return (f"holdings: {n:,} symbols carry a disclosure; "
                 f"{self.enriched:,} events matched one inside "
                 f"{self.window_days} days ({self.congress_hits:,} congress "
-                f"purchases, {self.stake_hits:,} stakes)")
+                f"purchases, {self.stake_hits:,} stakes)"
+                f"{unmapped}")
 
 
 class FundamentalsJoin:

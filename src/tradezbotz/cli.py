@@ -41,6 +41,9 @@ MACRO_DB = "macro.db"
 #: Per-run step outcomes. A pipeline that reports success while a third of
 #: its steps have silently failed for a week is worse than one that fails.
 RUNLOG_DB = "runlog.db"
+#: CUSIP -> ticker. A 13F information table names holdings by CUSIP only, so
+#: without this map every institutional position is invisible to the join.
+CUSIP_DB = "cusip.db"
 KIND_INSIDER = "insider_transaction"
 
 #: Price history ceiling: events older than this cannot be labelled, because no
@@ -1327,6 +1330,64 @@ def _history_floors(bars_path: Path, basis: str, days: int) -> dict[str, date]:
     return {sym: first + timedelta(days=days) for sym, first in firsts.items()}
 
 
+def cmd_resolve_cusips(args: argparse.Namespace) -> int:
+    """Map the CUSIPs in stored 13F/13D events to tickers.
+
+    Kept separate from `measure` on purpose, and for the same reason
+    `CachedOnlySource` exists: a measurement that reaches the network is not
+    reproducible, and its coverage becomes a statement about when it was run.
+    This fills the cache; the join reads it offline.
+    """
+    import os
+
+    from .lock import SingleInstance
+    from .research.cusip import CusipCache, OpenFigiClient, resolve_missing
+    from .research.eventstore import EventStore
+
+    lock = SingleInstance("ingest", DEFAULT_STATE)
+    lock.acquire()
+    try:
+        store = EventStore(DEFAULT_STATE / EVENTS_DB)
+        rows = store.raw_query(
+            "SELECT DISTINCT json_extract(payload, '$.cusip') FROM events "
+            "WHERE kind IN ('institutional_holding', 'beneficial_stake')")
+        cusips = [r[0] for r in rows if r[0]]
+        store.close()
+        print(f"{len(cusips):,} distinct CUSIPs in stored holdings")
+        if not cusips:
+            print("nothing to resolve; run ingest-holdings first")
+            return 0
+
+        cache = CusipCache(DEFAULT_STATE / CUSIP_DB)
+        try:
+            key = os.environ.get("OPENFIGI_API_KEY") or None
+            client = OpenFigiClient(api_key=key)
+            print(f"OpenFIGI {'with' if key else 'without'} an API key: "
+                  f"{client.batch_size} per request")
+            deadline = (time.monotonic() + args.max_minutes * 60
+                        if args.max_minutes else None)
+
+            def report(stats):
+                print(f"  asked {stats['asked']:,}  resolved "
+                      f"{stats['resolved']:,}  missed {stats['missed']:,}  "
+                      f"remaining {stats['remaining']:,}", flush=True)
+
+            stats = resolve_missing(cache, client, cusips, deadline=deadline,
+                                    on_progress=report)
+            total, found = cache.counts()
+            print(f"\nasked {stats['asked']:,} this run "
+                  f"({stats['resolved']:,} resolved, {stats['missed']:,} not "
+                  f"carried by the vendor)")
+            print(f"cache holds {total:,} CUSIPs, {found:,} mapped to a ticker")
+            if stats["remaining"]:
+                print(f"{stats['remaining']:,} left for the next run")
+        finally:
+            cache.close()
+        return 0
+    finally:
+        lock.release()
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     """Run the backlog against the labelled event population.
 
@@ -1586,7 +1647,18 @@ def cmd_measure(args: argparse.Namespace) -> int:
             print("profiles: no store yet; run backfill-intraday")
 
         hstore = EventStore(events_path)
-        active.append(HoldingsJoin(hstore))
+        cusip_map: dict[str, str] = {}
+        cusip_path = DEFAULT_STATE / CUSIP_DB
+        if cusip_path.exists():
+            from .research.cusip import CusipCache
+            with CusipCache(cusip_path) as cc:
+                cusip_map = cc.mapping()
+            print(f"cusip map: {len(cusip_map):,} tickers available for 13F "
+                  f"positions")
+        else:
+            print("cusip map: none yet; 13F positions carry a CUSIP and no "
+                  "ticker, so they cannot join. Run `resolve-cusips`")
+        active.append(HoldingsJoin(hstore, cusip_map=cusip_map))
 
         # The routine/opportunistic split. Its history is read from the STORE
         # rather than from the sampled payloads: at a 1-in-14 stride an
@@ -1928,6 +2000,14 @@ def build_parser() -> argparse.ArgumentParser:
     hld.add_argument("--max-minutes", type=int, default=0)
     hld.add_argument("--force", action="store_true")
     hld.set_defaults(func=cmd_ingest_holdings)
+
+    rc = sub.add_parser("resolve-cusips",
+                        help="map CUSIPs in stored 13F/13D events to tickers "
+                             "via OpenFIGI, so institutional holdings can join")
+    rc.add_argument("--max-minutes", type=float, default=0,
+                    help="time budget; the cache is permanent so a partial "
+                         "run simply resumes next time")
+    rc.set_defaults(func=cmd_resolve_cusips)
 
     ms = sub.add_parser("measure",
                         help="run the whole candidate backlog against labelled "

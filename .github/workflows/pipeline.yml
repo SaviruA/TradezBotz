@@ -39,6 +39,12 @@ on:
       measure_horizons:
         description: "Holding periods in sessions. Every strongest row in the 4.7-year sweep sat at the LONGEST horizon measured, because a round-trip cost amortises over a longer hold -- so the ceiling is worth probing"
         default: "1,5,20"
+      holdings_days:
+        description: "Days of EDGAR daily indexes to scan for 13F/13D. The default only reaches recent filings, while measurement runs 2016-2021 -- raise it deliberately to backfill history the join can actually reach"
+        default: "120"
+      holdings_years:
+        description: "Years of House bulk indexes to walk for congressional trades. Same window mismatch as holdings_days"
+        default: "2"
 
 concurrency:
   # Two runs sharing one state blob would silently lose whichever finishes first.
@@ -183,7 +189,33 @@ jobs:
         env:
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          python -m tradezbotz ingest-holdings --days 120 --years 2 --max-minutes 20
+          python -m tradezbotz ingest-holdings \
+            --days ${{ github.event.inputs.holdings_days || '120' }} \
+            --years ${{ github.event.inputs.holdings_years || '2' }} \
+            --max-minutes 20
+
+      # CUSIP -> ticker, and without it every 13F position above is invisible.
+      #
+      # A 13F information table names holdings by CUSIP and issuer name, never
+      # by ticker, so `Filing13F.to_events()` emits symbol=None and the join
+      # drops all of them. The first run that ingested real 13F data added
+      # 124,786 events in a day and the join still said "0 symbols carry a
+      # disclosure".
+      #
+      # Separate from `measure` deliberately, exactly as CachedOnlySource is: a
+      # measurement that reaches the network is not reproducible and its
+      # coverage becomes a statement about when it was run. The cache is
+      # permanent, so a budgeted partial run simply resumes next time.
+      #
+      # OPENFIGI_API_KEY is optional -- without it the client drops to the
+      # unauthenticated batch size and rate rather than failing.
+      - name: Resolve holding CUSIPs to tickers
+        id: cusips
+        continue-on-error: true
+        env:
+          OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
+        run: |
+          python -m tradezbotz resolve-cusips --max-minutes 10
 
       # ApeWisdom serves only a current snapshot -- no history exists at any
       # price. Sentiment can therefore never be backfilled, only accumulated,
@@ -380,6 +412,7 @@ jobs:
           record() { python -m tradezbotz runlog record --run-id "$rid" --step "$1" --outcome "$2"; }
           record "Ingest 8-K and 424B filings"          "${{ steps.filings.outcome }}"
           record "Ingest holdings and congress trades"  "${{ steps.holdings.outcome }}"
+          record "Resolve holding CUSIPs"               "${{ steps.cusips.outcome }}"
           record "Refresh geopolitical risk series"     "${{ steps.macro.outcome }}"
           record "Classify the symbol universe"         "${{ steps.assets.outcome }}"
           record "Crosscheck price sources"             "${{ steps.crosscheck.outcome }}"
