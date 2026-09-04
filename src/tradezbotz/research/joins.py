@@ -428,3 +428,130 @@ class MacroJoin:
         return (f"macro: {self.enriched:,} events carry a geopolitical regime, "
                 f"{self.skipped_no_history:,} predate enough trailing history "
                 f"(series covers {where})")
+
+
+class InsiderClassJoin:
+    """Routine vs opportunistic, the split the whole insider literature turns on.
+
+    Cohen, Malloy & Pomorski (Journal of Finance, 2012) found routine trades --
+    an insider who buys in the same calendar month year after year, for
+    diversification or a standing plan -- make up **over half the entire insider
+    universe and carry essentially no predictive power**. Stripping them out
+    left opportunistic trades carrying 82bp/month value-weighted.
+
+    `classify.RoutineClassifier` implemented this and was never wired to
+    anything: zero imports from `candidates`, so it had never appeared in a
+    sweep. Every measurement this system has produced -- `officer buy`,
+    `director buy`, `open-market buy` -- pooled both populations, which is to
+    say each was measured against a sample diluted by more than half with
+    trades the literature says carry no information. That is a plausible
+    mechanism for turning a real edge into "costs exceed edge".
+
+    **History comes from the store, not from the sampled payloads.** With a
+    1-in-14 stride an insider's own record is decimated, three consecutive
+    same-month years would almost never be visible, and virtually everyone
+    would classify UNKNOWN -- a null produced by the sampler rather than by the
+    data.
+
+    **Only trades disclosed before the entry cutoff count.** The classification
+    is a statement about what was knowable, and building it from an insider's
+    full record would leak their future trading into today's label. That is the
+    same lookahead the event store exists to prevent, moved one layer up.
+    """
+
+    needs_payload = True
+
+    def __init__(self, store, owner_ciks: set[str] | None = None) -> None:
+        self.store = store
+        self.owner_ciks = owner_ciks
+        self._history: dict[str, list[tuple[str, int, int]]] | None = None
+        self.enriched = 0
+        self.routine = 0
+        self.opportunistic = 0
+        self.unknown_no_history = 0
+
+    def _index(self) -> dict[str, list[tuple[str, int, int]]]:
+        """owner_cik -> [(observed_at, month, year)], sorted by disclosure.
+
+        One SQL pass with json_extract rather than deserialising several
+        million payloads in Python. Restricted to the owners actually present
+        in this sample, because holding every insider's record would cost
+        hundreds of megabytes to answer questions about a fraction of them.
+        """
+        if self._history is not None:
+            return self._history
+        from .classify import InsiderClass  # noqa: F401  (documents the pairing)
+
+        index: dict[str, list[tuple[str, int, int]]] = {}
+        sql = (
+            "SELECT json_extract(payload, '$.owner_cik') AS cik, "
+            "       json_extract(payload, '$.transaction_date') AS tdate, "
+            "       observed_at "
+            "FROM events WHERE kind = 'insider_transaction'"
+        )
+        for cik, tdate, observed in self.store.raw_query(sql):
+            if not cik or not tdate or not observed:
+                continue
+            if self.owner_ciks is not None and cik not in self.owner_ciks:
+                continue
+            try:
+                year, month = int(tdate[:4]), int(tdate[5:7])
+            except (ValueError, TypeError):
+                continue
+            index.setdefault(cik, []).append((observed, month, year))
+        for rows in index.values():
+            rows.sort()
+        self._history = index
+        return index
+
+    def features(self, payload: dict, label: Label) -> dict:
+        from .classify import InsiderClass, MIN_YEARS_FOR_ROUTINE, _same_month_streak
+
+        cik = payload.get("owner_cik")
+        if not cik or label.entry_day is None:
+            return {}
+        rows = self._index().get(cik)
+        if not rows:
+            self.unknown_no_history += 1
+            return {"insider_class": InsiderClass.UNKNOWN.value}
+
+        cutoff = _as_datetime(label.entry_day).isoformat()
+        by_month: dict[int, set[int]] = {}
+        years_seen: set[int] = set()
+        for observed, month, year in rows:
+            if observed >= cutoff:
+                break
+            by_month.setdefault(month, set()).add(year)
+            years_seen.add(year)
+
+        # Fewer than the required years of prior record cannot be SHOWN routine,
+        # so it falls to UNKNOWN. Collapsing UNKNOWN into OPPORTUNISTIC would
+        # pad the signal population with first-time filers, which is the
+        # obvious way to fool yourself here.
+        if len(years_seen) < MIN_YEARS_FOR_ROUTINE:
+            self.unknown_no_history += 1
+            return {"insider_class": InsiderClass.UNKNOWN.value}
+
+        entry_month = label.entry_day.month
+        prior = sorted(y for y in by_month.get(entry_month, set())
+                       if y < label.entry_day.year)
+        routine = _same_month_streak(prior) >= MIN_YEARS_FOR_ROUTINE
+        cls = InsiderClass.ROUTINE if routine else InsiderClass.OPPORTUNISTIC
+        self.enriched += 1
+        if routine:
+            self.routine += 1
+        else:
+            self.opportunistic += 1
+        return {
+            "insider_class": cls.value,
+            "is_opportunistic": not routine,
+            "is_routine": routine,
+        }
+
+    def summary(self) -> str:
+        total = self.routine + self.opportunistic
+        share = f"{self.routine / total:.1%}" if total else "n/a"
+        return (f"insider class: {self.opportunistic:,} opportunistic, "
+                f"{self.routine:,} routine ({share} routine), "
+                f"{self.unknown_no_history:,} without "
+                f"{3} years of prior record (UNKNOWN, not assumed either way)")

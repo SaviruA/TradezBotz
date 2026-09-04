@@ -100,8 +100,23 @@ def features_at(bars: Sequence[Bar]) -> dict:
     rvol = ind.relative_volume(bars, i)
     mom = ind.momentum(bars)[i]
 
+    # Liquidity, read from the same prior window as everything else here.
+    #
+    # Not an indicator -- a tradability measure, and the one the whole cost
+    # problem turns on. 82 of 232 verdicts in the 5.5-year sweep were "costs
+    # exceed edge", and the published insider result says the same thing:
+    # abnormal returns "vanish and even become negative" once the tradable
+    # dollar amount is held to a reasonable size, being "negatively correlated
+    # with stock liquidity". Without these two fields there was no way to
+    # express "the same signal, in names where a round trip does not eat it".
+    window = bars[max(0, i - 19):i + 1]
+    dollar_volumes = [b.close * b.volume for b in window if b.volume and b.close]
+
     out: dict = {
         "has_features": True,
+        "entry_close": bars[i].close,
+        "dollar_volume_20d": (sum(dollar_volumes) / len(dollar_volumes)
+                              if dollar_volumes else 0.0),
         "rsi_oversold": ind.rsi_oversold(bars, i),
         "bb_squeeze": ind.bollinger_squeeze(bars, i),
         "bb_below_lower": ind.bollinger_below_lower(bars, i),

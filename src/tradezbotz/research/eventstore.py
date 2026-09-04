@@ -108,6 +108,26 @@ class EventStore:
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
+    def raw_query(self, sql: str, params: tuple = ()):
+        """Read-only escape hatch for aggregate scans over the whole store.
+
+        `as_of` is the right interface for anything that reasons about one
+        point in time, and nothing here should bypass its revision handling to
+        answer such a question. This exists for the other shape: a single pass
+        that builds an index, where going through `as_of` would deserialise
+        several million payloads in Python to read two fields out of each.
+
+        Refuses anything but SELECT. The store's whole value is that history
+        cannot be rewritten under a backtest, and a general-purpose execute()
+        on it would be a loaded gun pointed at that guarantee.
+        """
+        if not sql.lstrip().upper().startswith("SELECT"):
+            raise EventStoreError(
+                "raw_query is read-only: the event store's guarantee is that "
+                "history cannot be rewritten under a running backtest"
+            )
+        return self._conn.execute(sql, params)
+
     def close(self) -> None:
         self._conn.close()
 

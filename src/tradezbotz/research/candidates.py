@@ -37,6 +37,17 @@ CODE_OPEN_MARKET_BUY = "P"
 #: token director purchase made for optics.
 LARGE_BUY_NOTIONAL = 100_000.0
 
+#: Prior-20-session average dollar volume above which a name is treated as
+#: liquid enough to trade. The retail-quant convention is roughly 1M shares a
+#: day; at a $5 median microcap price that is ~$5M, which is the figure taken
+#: here. Published convention, deliberately NOT fitted to our own results.
+LIQUID_DOLLAR_VOLUME = 5_000_000.0
+
+#: The conventional minimum price. Below it, names overlap heavily with
+#: delisting candidates, unreliable quotes and extreme spreads -- which is our
+#: survivorship problem and our cost problem in a single filter.
+MIN_TRADEABLE_PRICE = 3.0
+
 
 def _buy(payload, label) -> bool:
     return (
@@ -294,7 +305,110 @@ def join_candidates() -> list[Candidate]:
         prior="the most plausible fundamental pairing: an insider buying into "
               "growth is a different statement from one buying a decline",
     ))
+    out.extend(insider_class_candidates())
+    out.extend(liquidity_candidates())
     return out
+
+
+def insider_class_candidates() -> list[Candidate]:
+    """The routine/opportunistic split, and the control that makes it a test.
+
+    Cohen, Malloy & Pomorski (JF 2012): routine trades are over half the
+    insider universe and carry essentially no predictive power; stripping them
+    out left 82bp/month value-weighted in the remainder. `RoutineClassifier`
+    implemented this and was never referenced from this file, so it had never
+    run -- and every insider measurement so far pooled both populations.
+
+    `routine buy` is included deliberately and is expected to be flat. It is
+    the control: if routine and opportunistic perform alike, the split carries
+    nothing here and the paper's result did not survive to this universe or
+    this decade. A split that only ever reports its good half is not a test.
+    """
+    return [
+        Candidate(
+            "opportunistic buy",
+            all_of(_buy, _true("is_opportunistic")),
+            "Open-market purchase by an insider breaking their own trading "
+            "pattern -- not a same-month annual habit.",
+            prior="the literature's strongest insider result; expect decay "
+                  "from 82bp/month on a 1986-2007 large-cap sample",
+        ),
+        Candidate(
+            "routine buy",
+            all_of(_buy, _true("is_routine")),
+            "Open-market purchase by an insider who buys the same calendar "
+            "month year after year. The CONTROL for the split above.",
+            prior="flat. If this pays like the opportunistic cut, the split "
+                  "carries no information here and the pairing is dead",
+        ),
+        Candidate(
+            "opportunistic officer buy",
+            all_of(_buy, _true("is_opportunistic"), _true("is_officer")),
+            "Both refinements at once: an officer, who sees the numbers, "
+            "breaking their own pattern.",
+            prior="the narrowest population we can name a mechanism for, and "
+                  "correspondingly the thinnest",
+        ),
+    ]
+
+
+def liquidity_candidates() -> list[Candidate]:
+    """Cuts on tradability, which is where the whole cost problem lives.
+
+    82 of 232 verdicts in the 5.5-year sweep were "costs exceed edge". That is
+    not a precision problem and no amount of extra data moves it: we pay a
+    ~93bp median round trip BECAUSE the universe is microcaps. The published
+    result matches -- insider abnormal returns "vanish and even become negative
+    when limiting the tradable dollar amount to a reasonable size", and are
+    "negatively correlated with stock liquidity".
+
+    Thresholds are the conventional retail-quant screen (>=$3, dollar-volume
+    floors), taken as published rather than fitted. A fitted threshold is a
+    search, and a search that does not register its trials is the exact thing
+    this apparatus exists to prevent.
+    """
+    return [
+        Candidate(
+            "buy + liquid",
+            all_of(_buy, lambda p, l: (p.get("dollar_volume_20d") or 0)
+                   >= LIQUID_DOLLAR_VOLUME),
+            f"Open-market purchase in a name trading at least "
+            f"${LIQUID_DOLLAR_VOLUME:,.0f} a day over the prior 20 sessions.",
+            prior="the most promising untried lever: same signal, priced where "
+                  "a round trip does not eat it",
+        ),
+        Candidate(
+            "buy + liquid + above $3",
+            all_of(_buy,
+                   lambda p, l: (p.get("dollar_volume_20d") or 0)
+                   >= LIQUID_DOLLAR_VOLUME,
+                   lambda p, l: (p.get("entry_close") or 0) >= MIN_TRADEABLE_PRICE),
+            f"As above, and priced at or above ${MIN_TRADEABLE_PRICE:.0f} -- the "
+            f"conventional line excluding sub-penny risk, delisting candidates "
+            f"and unreliable quotes.",
+            prior="the community's baseline hygiene, never applied here",
+        ),
+        Candidate(
+            "opportunistic buy + liquid",
+            all_of(_buy, _true("is_opportunistic"),
+                   lambda p, l: (p.get("dollar_volume_20d") or 0)
+                   >= LIQUID_DOLLAR_VOLUME),
+            "Both fixes at once: the population the literature says carries "
+            "the information, in names where costs do not eat it.",
+            prior="if anything in this system works, the prior says it is this "
+                  "row -- which is also why it must be read against its "
+                  "controls rather than on its own",
+        ),
+        Candidate(
+            "buy + illiquid",
+            all_of(_buy, lambda p, l: 0 < (p.get("dollar_volume_20d") or 0)
+                   < LIQUID_DOLLAR_VOLUME),
+            "The complement, and the reason it is here: if the liquid cut "
+            "wins only because this one loses, that is a cost story, not an "
+            "alpha story, and the two must be visible side by side.",
+            prior="negative after costs, per every measurement so far",
+        ),
+    ]
 
 
 #: Hypotheses we intend to measure and cannot yet. Each names the missing

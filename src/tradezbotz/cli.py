@@ -1564,6 +1564,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
         from .research.joins import (
             FundamentalsJoin,
             HoldingsJoin,
+            InsiderClassJoin,
             MacroJoin,
             ProfileJoin,
             enrich_all,
@@ -1586,6 +1587,22 @@ def cmd_measure(args: argparse.Namespace) -> int:
 
         hstore = EventStore(events_path)
         active.append(HoldingsJoin(hstore))
+
+        # The routine/opportunistic split. Its history is read from the STORE
+        # rather than from the sampled payloads: at a 1-in-14 stride an
+        # insider's own record is decimated, three consecutive same-month years
+        # would almost never be visible, and nearly everyone would classify
+        # UNKNOWN -- a null manufactured by the sampler.
+        #
+        # Restricted to the owners actually in this sample, because indexing
+        # every insider in a 3.9M-event store to answer questions about a
+        # fraction of them costs hundreds of megabytes for nothing.
+        owner_ciks = {p.get("owner_cik") for p in payloads if p.get("owner_cik")}
+        if owner_ciks:
+            active.append(InsiderClassJoin(hstore, owner_ciks=owner_ciks))
+        else:
+            print("insider class: no owner_cik on any payload; the "
+                  "routine/opportunistic split cannot be computed")
 
         macro_path = DEFAULT_STATE / MACRO_DB
         if macro_path.exists():
