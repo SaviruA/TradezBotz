@@ -1827,8 +1827,56 @@ def cmd_measure(args: argparse.Namespace) -> int:
                 msg = sizing_warning(labels, _h, _crit, sampled_fraction)
                 if msg:
                     print(msg)
-        except Exception:  # noqa: BLE001 - diagnostics must not stop the sweep
-            pass
+
+            # What the signal looks like once slots are finite.
+            #
+            # The sweep above measures an event study -- every qualifying event
+            # taken, no capital constraint. This is the same population held at
+            # the capacity the criteria file actually commits to, and the two
+            # are different strategies. Reported for the open-market buy
+            # population because that is the base every candidate refines.
+            #
+            # Conviction is the ranking under test and `arrival order` is its
+            # control: if ranking does not beat taking whatever came first at
+            # the same capacity, the ranking carries nothing and any difference
+            # from the uncapped study came from the constraint changing the
+            # population rather than from choosing well.
+            from .research.portfolio import compare as _pf_compare
+
+            def _conviction(payload, label) -> float:
+                # Point-in-time and payload-only, so no lookahead. Deliberately
+                # crude and stated as such -- a real allocator would size by
+                # volatility -- but a crude STATED rule beats the implicit
+                # "whatever order the store returned" that a cap alone applies.
+                score = 0.0
+                if payload.get("is_opportunistic"):
+                    score += 2.0
+                if payload.get("is_officer"):
+                    score += 1.0
+                dv = payload.get("dollar_volume_20d") or 0.0
+                if dv > 0:
+                    score += min(dv / 5_000_000.0, 2.0)
+                return score
+
+            buys = [(p, l) for p, l in zip(payloads, labels)
+                    if p.get("transaction_code") == "P"
+                    and p.get("acquired_disposed") == "A"]
+            if buys:
+                bp = [p for p, _ in buys]
+                bl = [l for _, l in buys]
+                print("\nopen-market buys at the committed capacity "
+                      f"({_crit.max_concurrent_positions} positions):")
+                for _h in horizons:
+                    print(_pf_compare(bp, bl, _h,
+                                      max_positions=_crit.max_concurrent_positions,
+                                      rank=_conviction, rank_name="conviction"))
+        except Exception as exc:  # noqa: BLE001 - must not stop the sweep
+            # Reported, never swallowed. A silent `pass` here is the same
+            # failure that hid the holdings ingest crashing on its first
+            # request every night: the only symptom was a downstream line that
+            # read as a finding about the market rather than as a broken step.
+            print(f"portfolio/sizing diagnostics failed: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
         assessments = sweep(
             cands, labels, payloads, registry=registry, horizons=horizons,
