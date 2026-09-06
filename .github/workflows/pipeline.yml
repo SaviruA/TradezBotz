@@ -39,6 +39,9 @@ on:
       measure_horizons:
         description: "Holding periods in sessions. Every strongest row in the 4.7-year sweep sat at the LONGEST horizon measured, because a round-trip cost amortises over a longer hold -- so the ceiling is worth probing"
         default: "1,5,20"
+      cusip_minutes:
+        description: "Budget for CUSIP resolution. 30,736 CUSIPs sit in stored holdings and unauthenticated OpenFIGI moves ~2,000 in ten minutes, so this finishes in several nights. An OPENFIGI_API_KEY secret raises the batch from 10 to 100 and would finish it in one run"
+        default: "25"
       measure_entry_delay:
         description: "Sessions to skip between the first tradeable open and the one bought. 0 is the real measurement; 1 is the bid-ask bounce diagnostic (Conrad/Gultekin/Kaul) -- an information effect survives the skip, a microstructure artefact does not"
         default: "0"
@@ -218,7 +221,8 @@ jobs:
         env:
           OPENFIGI_API_KEY: ${{ secrets.OPENFIGI_API_KEY }}
         run: |
-          python -m tradezbotz resolve-cusips --max-minutes 10
+          python -m tradezbotz resolve-cusips \
+            --max-minutes ${{ github.event.inputs.cusip_minutes || '25' }}
 
       # ApeWisdom serves only a current snapshot -- no history exists at any
       # price. Sentiment can therefore never be backfilled, only accumulated,

@@ -1341,7 +1341,10 @@ def cmd_resolve_cusips(args: argparse.Namespace) -> int:
     import os
 
     from .lock import SingleInstance
-    from .research.cusip import CusipCache, OpenFigiClient, resolve_missing
+    from .research.cusip import (
+        BATCH_AUTHENTICATED, BATCH_UNAUTHENTICATED, CusipCache, OpenFigiClient,
+        resolve_missing,
+    )
     from .research.eventstore import EventStore
 
     lock = SingleInstance("ingest", DEFAULT_STATE)
@@ -1380,7 +1383,17 @@ def cmd_resolve_cusips(args: argparse.Namespace) -> int:
                   f"carried by the vendor)")
             print(f"cache holds {total:,} CUSIPs, {found:,} mapped to a ticker")
             if stats["remaining"]:
-                print(f"{stats['remaining']:,} left for the next run")
+                # An ETA, because "22,926 left" reads as progress and
+                # "eleven more nights" reads as the decision it actually is:
+                # set OPENFIGI_API_KEY and the batch goes from 10 to 100.
+                per_run = max(stats["asked"], 1)
+                print(f"{stats['remaining']:,} left -- roughly "
+                      f"{stats['remaining'] // per_run + 1} more runs at this "
+                      f"budget. An OPENFIGI_API_KEY secret raises the batch "
+                      f"from {BATCH_UNAUTHENTICATED} to {BATCH_AUTHENTICATED} "
+                      f"and would finish it in one."
+                      if not key else
+                      f"{stats['remaining']:,} left for the next run")
         finally:
             cache.close()
         return 0
