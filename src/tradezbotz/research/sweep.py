@@ -340,6 +340,28 @@ def report(assessments: Sequence[Assessment],
     lines.append(f"{len(kept)} of {len(assessments)} measurements survived "
                  f"every gate.")
 
+    # The DSR's own inputs, so a movement in the gate can be attributed.
+    #
+    # `opportunistic buy + liquid` h=60 went DSR 0.550 -> 0.943 across two runs
+    # while its net return got WORSE. That is the gate moving, not the
+    # candidate improving, and three terms can produce it in opposite
+    # directions: more trials raises the bar, a smaller spread of registered
+    # Sharpes lowers it, and a larger effective sample raises the score.
+    # Printed every run so the next swing is diagnosable from the log rather
+    # than reconstructed afterwards -- a gate nobody can audit must not
+    # authorise money.
+    if assessments:
+        r0 = assessments[0].result
+        lines.append(
+            f"DSR inputs: {r0.n_trials:,} trials, spread of registered Sharpes "
+            f"var={r0.sharpe_variance:.6f} (sd={r0.sharpe_variance ** 0.5:.4f}) "
+            f"over {r0.sharpe_population:,} completed, "
+            f"expected max Sharpe {r0.expected_max_sharpe:.3f} annualised.")
+        lines.append(
+            "  A FALLING variance lowers the bar for every candidate at once. "
+            "If that term moved and the trial count did not, the change is in "
+            "the gate rather than in any result.")
+
     # Decompose the strongest rows, whether or not they were kept.
     #
     # The gates answer "is this distinguishable from noise". They do not answer

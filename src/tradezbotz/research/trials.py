@@ -389,4 +389,18 @@ def assess(
         * math.sqrt(periods_per_year),
         "deflated_sharpe": dsr,
         "significant": dsr >= 0.95,
+        # The DSR's own inputs, returned so a movement can be ATTRIBUTED.
+        #
+        # The same candidate at the same horizon went DSR 0.550 -> 0.943 across
+        # two runs while its net return got WORSE, which is the gate moving
+        # rather than the candidate improving. Three terms can produce that and
+        # they pull in opposite directions: more trials raises the bar, a
+        # smaller spread of registered Sharpes lowers it, and a larger
+        # effective sample raises the score. Without these logged there is no
+        # way to say which happened, and a gate nobody can audit cannot
+        # authorise money.
+        "sharpe_variance": variance,
+        "sharpe_population": len(sharpes),
+        "n_obs_effective": n_obs,
+        "observed_sharpe_per_obs": sr,
     }

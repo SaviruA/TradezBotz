@@ -114,6 +114,11 @@ class BacktestResult:
     #: skewness-adjusted inference that long horizons require. None when
     #: there were too few trades to decompose.
     concentration: object | None = None
+    #: The DSR's own inputs, kept so a movement in the gate can be attributed
+    #: rather than guessed at. See `trials.assess`.
+    sharpe_variance: float = 0.0
+    sharpe_population: int = 0
+    expected_max_sharpe: float = 0.0
     #: Mean return after round-trip transaction costs. Zero when no cost model
     #: was supplied, in which case `costed` is False and the gross figure is the
     #: only one that exists.
@@ -464,6 +469,9 @@ def run(
         clusters_sufficient=cluster.enough_clusters,
         mean_return_net=mean_net, median_cost_bps=median_cost_bps, costed=costed,
         coverage=coverage, concentration=concentration,
+        sharpe_variance=float(verdict.get("sharpe_variance", 0.0)),
+        sharpe_population=int(verdict.get("sharpe_population", 0)),
+        expected_max_sharpe=float(verdict.get("expected_max_sharpe_annual", 0.0)),
     )
 
 
