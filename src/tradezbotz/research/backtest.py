@@ -32,6 +32,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
+from .concentration import CONCENTRATED_ABOVE
 from .concentration import analyse as analyse_concentration
 from .labeler import Coverage, Label
 from .trials import TrialRegistry, assess
@@ -142,10 +143,24 @@ class BacktestResult:
     def outlier_dependent(self) -> bool:
         """Whether the result leans on a few extreme observations.
 
-        If capping returns at ±15% halves the mean, the edge lives in the tail
-        rather than the population -- and on this data a tail observation is as
-        likely to be a phantom print as a real move.
+        **Answered by direct measurement where possible.** This used to compare
+        the winsorised mean against the raw one, with a cap fixed at ±15%
+        regardless of holding period. That is a proxy, and at long horizons it
+        broke: it labelled a row whose top five trades carried 13.8% of its
+        return "outlier dependent", and gave the identical verdict to one where
+        five trades carried 66.7%. The proxy could not distinguish a broad edge
+        from a lottery ticket, which was the only thing it was for.
+
+        The concentration decomposition measures the quantity itself -- what
+        share of the total return the best few trades contributed -- so it is
+        used when available. The winsorised ratio remains the fallback for
+        results too small to decompose, now with a horizon-scaled cap.
         """
+        conc = self.concentration
+        if conc is not None and getattr(conc, "top_share", None):
+            top5 = conc.top_share.get(5)
+            if top5 is not None and top5 == top5:  # not NaN
+                return bool(top5 >= CONCENTRATED_ABOVE)
         if self.mean_return == 0:
             return False
         return abs(self.mean_return_winsorised / self.mean_return) < 0.5
@@ -261,6 +276,29 @@ class BacktestResult:
 #: -- which is a finding about fragility, not a number to quietly fix.
 WINSOR_LIMIT = 0.15
 
+#: Horizon the bound above is calibrated for. Welch's figure describes SHORT
+#: horizon returns, and applying it unscaled to a 60-session hold clips ordinary
+#: variation rather than outliers -- a 3-month microcap move past 15% is
+#: unremarkable. Left unscaled, the sensitivity check labelled a row whose top
+#: five trades carried 13.8% of its return as "rests on a few outliers", and
+#: gave the identical verdict to one where five trades carried 66.7%. The test
+#: could not tell a broad edge from a lottery ticket, which is the only thing it
+#: was for.
+WINSOR_BASE_HORIZON = 5
+
+
+def winsor_limit_for(horizon: int, base: float = WINSOR_LIMIT) -> float:
+    """Scale the bound with the square root of holding period.
+
+    Return dispersion grows with the square root of time, so a fixed cap gets
+    tighter in real terms the longer the hold. Scaling keeps the check asking
+    the same question at every horizon: is this row carried by observations
+    extreme RELATIVE TO ITS OWN horizon.
+    """
+    if horizon <= 0:
+        return base
+    return base * math.sqrt(horizon / WINSOR_BASE_HORIZON)
+
 
 def winsorise(xs: Sequence[float], limit: float = WINSOR_LIMIT) -> list[float]:
     """Cap values at ±limit, keeping every observation."""
@@ -361,7 +399,7 @@ def run(
     cluster = diagnose(returns, symbols, entry_days)
 
     mean = statistics.fmean(returns)
-    mean_w = statistics.fmean(winsorise(returns))
+    mean_w = statistics.fmean(winsorise(returns, winsor_limit_for(horizon)))
 
     # Decomposed on the NET series when we have one, because the question is
     # about the return a portfolio would actually keep. Computed here because

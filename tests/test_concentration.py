@@ -171,3 +171,80 @@ def test_a_backtest_result_carries_the_decomposition():
         kurtosis=3.0, deflated_sharpe=0.5, n_trials=10, significant=False)
 
     assert r.concentration is None  # default; populated by `run`
+
+
+# --- the verdict now measures rather than infers ----------------------------
+
+def test_the_winsor_bound_scales_with_holding_period():
+    """Welch's +/-15% describes SHORT horizon returns. Applied unscaled to a
+    60-session hold it clips ordinary variation -- a 3-month microcap move past
+    15% is unremarkable."""
+    from tradezbotz.research.backtest import WINSOR_LIMIT, winsor_limit_for
+
+    assert winsor_limit_for(5) == pytest.approx(WINSOR_LIMIT)
+    assert winsor_limit_for(60) > winsor_limit_for(20) > winsor_limit_for(5)
+    assert winsor_limit_for(1) < WINSOR_LIMIT
+
+
+def test_a_degenerate_horizon_does_not_produce_a_zero_cap():
+    """A zero cap would winsorise every return to zero and report every row as
+    outlier-dependent."""
+    from tradezbotz.research.backtest import WINSOR_LIMIT, winsor_limit_for
+
+    assert winsor_limit_for(0) == WINSOR_LIMIT
+
+
+def test_the_broad_row_and_the_lottery_row_now_get_different_answers():
+    """The regression, in the terms the real run produced it. `buy + liquid`
+    had a top-5 share of 13.8% and `buy + bb_below_lower` had 66.7%, and the
+    old winsor-ratio proxy gave both the identical verdict."""
+    from tradezbotz.research.backtest import BacktestResult
+
+    def _result(returns):
+        import statistics
+        return BacktestResult(
+            hypothesis="h", horizon=60, trial_id=1, n_events=len(returns),
+            n_trades=len(returns), mean_return=statistics.fmean(returns),
+            median_return=statistics.median(returns), stdev=0.1, hit_rate=0.5,
+            sharpe_per_trade=0.1, sharpe_annualised=0.1, t_stat=1.0, skew=0.0,
+            kurtosis=3.0, deflated_sharpe=0.5, n_trials=10, significant=False,
+            mean_return_winsorised=0.02,
+            concentration=analyse(returns))
+
+    broad = _result([0.05] * 200)
+    lottery = _result([0.0] * 195 + [4.0] * 5)
+
+    assert broad.outlier_dependent is False
+    assert lottery.outlier_dependent is True
+
+
+def test_a_result_too_small_to_decompose_falls_back_to_the_winsor_ratio():
+    """Below the decomposition floor there is nothing to measure, and the old
+    proxy is better than no check at all."""
+    from tradezbotz.research.backtest import BacktestResult
+
+    r = BacktestResult(
+        hypothesis="h", horizon=60, trial_id=1, n_events=5, n_trades=5,
+        mean_return=0.10, median_return=0.10, stdev=0.1, hit_rate=0.5,
+        sharpe_per_trade=0.1, sharpe_annualised=0.1, t_stat=1.0, skew=0.0,
+        kurtosis=3.0, deflated_sharpe=0.5, n_trials=10, significant=False,
+        mean_return_winsorised=0.02, concentration=None)
+
+    assert r.outlier_dependent is True
+
+
+def test_an_undefined_contribution_ratio_falls_back_rather_than_passing():
+    """Against a non-positive total the share is NaN, and NaN must not be read
+    as "not concentrated"."""
+    from tradezbotz.research.backtest import BacktestResult
+
+    losers = [-0.5] * 50 + [0.1] * 50
+    r = BacktestResult(
+        hypothesis="h", horizon=60, trial_id=1, n_events=100, n_trades=100,
+        mean_return=-0.2, median_return=-0.2, stdev=0.1, hit_rate=0.5,
+        sharpe_per_trade=0.1, sharpe_annualised=0.1, t_stat=1.0, skew=0.0,
+        kurtosis=3.0, deflated_sharpe=0.5, n_trials=10, significant=False,
+        mean_return_winsorised=-0.01, concentration=analyse(losers))
+
+    # Falls through to the winsor ratio rather than silently returning False.
+    assert r.outlier_dependent is True
